@@ -1,0 +1,22 @@
+# SECRETS — never commit the e.firma or downloaded packages
+*.cer
+*.key
+*.pem
+*.pfx
+*.p12
+*.zip
+.env
+secrets/
+certificados/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
