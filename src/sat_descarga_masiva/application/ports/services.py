@@ -16,6 +16,12 @@ class BackoffStrategy(Protocol):
     def delay(self, attempt: int) -> timedelta: ...
 
 
+class Sleeper(Protocol):
+    """Abstracts the wait so the application never calls time.sleep (AGENT.md §3)."""
+
+    def sleep(self, duration: timedelta) -> None: ...
+
+
 class HttpResponse(Protocol):
     @property
     def status(self) -> int: ...
