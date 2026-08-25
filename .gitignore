@@ -20,3 +20,5 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
+.idea/
+sat-descarga-masiva/
