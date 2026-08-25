@@ -8,9 +8,11 @@ GATEWAY_FACTORIES when M1 lands it — the suite then proves interchangeability.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import cast
 
 import pytest
 
+from sat_descarga_masiva.application.ports.gateways import SatGateway
 from sat_descarga_masiva.domain.enums.catalog import (
     Direction,
     DocumentStatus,
@@ -67,36 +69,51 @@ class FakeSatGateway:
         return Package(package_id, b"PK\x03\x04zip")
 
 
+class FakeIdentity:
+    """Minimal SigningIdentity double for authenticate()."""
+
+    rfc = "AAA010101AAA"
+    cer_base64 = "x"
+
+    def sign(self, data: bytes) -> bytes:
+        return b"sig"
+
+
+def _fake_conforms(g: FakeSatGateway) -> SatGateway:
+    """mypy proof that FakeSatGateway satisfies the SatGateway Protocol (AGENT.md §12)."""
+    return g
+
+
 GATEWAY_FACTORIES = [pytest.param(FakeSatGateway, id="FakeSatGateway")]
 
 
 @pytest.fixture(params=GATEWAY_FACTORIES)
-def gateway(request: pytest.FixtureRequest) -> object:
-    return request.param()
+def gateway(request: pytest.FixtureRequest) -> SatGateway:
+    return cast(SatGateway, request.param())
 
 
-def test_authenticate_returns_repr_safe_token(gateway: object) -> None:
-    token = gateway.authenticate(RFC)
+def test_authenticate_returns_repr_safe_token(gateway: SatGateway) -> None:
+    token = gateway.authenticate(FakeIdentity())
     assert token.is_valid(datetime(2026, 1, 1))
     assert repr(token) == "AccessToken(***)"
 
 
-def test_request_returns_request_id_and_ok(gateway: object) -> None:
-    token = gateway.authenticate(RFC)
+def test_request_returns_request_id_and_ok(gateway: SatGateway) -> None:
+    token = gateway.authenticate(FakeIdentity())
     result = gateway.request(_query(), token)
     assert result.request_id is not None
     assert result.cod_estatus.value == "5000"
 
 
-def test_verify_returns_completed_with_packages(gateway: object) -> None:
-    token = gateway.authenticate(RFC)
+def test_verify_returns_completed_with_packages(gateway: SatGateway) -> None:
+    token = gateway.authenticate(FakeIdentity())
     result = gateway.verify(RequestId(RID), RFC, token)
     assert result.state is RequestState.COMPLETED
     assert len(result.ids_paquetes) == 1
 
 
-def test_download_returns_package_with_matching_id(gateway: object) -> None:
-    token = gateway.authenticate(RFC)
+def test_download_returns_package_with_matching_id(gateway: SatGateway) -> None:
+    token = gateway.authenticate(FakeIdentity())
     pid = PackageId(f"{RID}_01")
     package = gateway.download(pid, RFC, token)
     assert package.package_id == pid

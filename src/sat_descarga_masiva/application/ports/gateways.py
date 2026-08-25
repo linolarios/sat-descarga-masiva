@@ -25,3 +25,18 @@ class VerificationGateway(Protocol):
 
 class DownloadGateway(Protocol):
     def download(self, package_id: PackageId, rfc: Rfc, token: AccessToken) -> Package: ...
+
+
+class SatGateway(Protocol):
+    """Concrete SAT adapters implement all four ops (AGENT.md §12).
+
+    Enables one swappability contract suite: FakeSatGateway, SatcfdiGateway and
+    any future backend all satisfy this Protocol. Enforced via a _conforms
+    assertion at each implementation site so a real conformance violation (not
+    just a runtime hiccup) fails `make check`.
+    """
+
+    def authenticate(self, identity: SigningIdentity) -> AccessToken: ...
+    def request(self, query: DownloadQuery, token: AccessToken) -> SubmitResult: ...
+    def verify(self, request_id: RequestId, rfc: Rfc, token: AccessToken) -> VerificationResult: ...
+    def download(self, package_id: PackageId, rfc: Rfc, token: AccessToken) -> Package: ...
