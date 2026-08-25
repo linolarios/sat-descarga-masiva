@@ -7,6 +7,7 @@ GATEWAY_FACTORIES when M1 lands it — the suite then proves interchangeability.
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timedelta
 from typing import cast
 
@@ -30,9 +31,34 @@ from sat_descarga_masiva.domain.model.value_objects import (
     RequestId,
     Rfc,
 )
+from sat_descarga_masiva.infrastructure.sat.gateways.satcfdi_gateway import SatcfdiGateway
 
 RFC = Rfc("AAA010101AAA")
 RID = "4e80345d-917f-40bb-a98f-4a73939353c5"
+
+
+class FakeClock:
+    def now(self) -> datetime:
+        return datetime(2026, 1, 1)
+
+
+class FakeSat:
+    """Double for satcfdi.pacs.sat.SAT (the subset SatcfdiGateway uses)."""
+
+    def recover_comprobante_received_request(self, **kwargs: object) -> dict[str, object]:
+        return {"IdSolicitud": RID, "CodEstatus": "5000", "Mensaje": "Solicitud Aceptada"}
+
+    def recover_comprobante_status(self, id_solicitud: str) -> dict[str, object]:
+        return {
+            "EstadoSolicitud": 3,
+            "CodEstatus": "5000",
+            "NumeroCFDIs": 1,
+            "Mensaje": "Solicitud Aceptada",
+            "IdsPaquetes": [f"{RID}_01"],
+        }
+
+    def recover_comprobante_download(self, id_paquete: str) -> tuple[dict[str, object], str]:
+        return ({"CodEstatus": "5000"}, base64.b64encode(b"PK\x03\x04zip").decode("ascii"))
 
 
 def _query() -> DownloadQuery:
@@ -84,7 +110,20 @@ def _fake_conforms(g: FakeSatGateway) -> SatGateway:
     return g
 
 
-GATEWAY_FACTORIES = [pytest.param(FakeSatGateway, id="FakeSatGateway")]
+def _satcfdi_factory() -> SatcfdiGateway:
+    """Build SatcfdiGateway over the FakeSat double (no live SAT in unit tests)."""
+    return SatcfdiGateway(sat=FakeSat(), signer=FakeIdentity(), clock=FakeClock())
+
+
+def _satcfdi_conforms(g: SatcfdiGateway) -> SatGateway:
+    """mypy proof that SatcfdiGateway satisfies the SatGateway Protocol (§12)."""
+    return g
+
+
+GATEWAY_FACTORIES = [
+    pytest.param(FakeSatGateway, id="FakeSatGateway"),
+    pytest.param(_satcfdi_factory, id="SatcfdiGateway"),
+]
 
 
 @pytest.fixture(params=GATEWAY_FACTORIES)
