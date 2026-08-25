@@ -5,7 +5,17 @@ description = "Hexagonal Python client for the SAT (Mexico) Descarga Masiva SOAP
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = ["cryptography>=42.0", "lxml>=5.0", "signxml>=4.0", "requests>=2.31", "pydantic>=2.6"]
+dependencies = [
+    "cryptography>=42.0",
+    "keyring>=25.0",
+    "lxml>=5.0",
+    "openpyxl>=3.1",
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+    "rich>=13.0",
+    "satcfdi~=26.8",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "pytest-mock>=3.12", "responses>=0.25",
