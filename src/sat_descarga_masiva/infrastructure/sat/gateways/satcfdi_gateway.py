@@ -79,8 +79,17 @@ class SatcfdiGateway:
         )
 
     def request(self, query: DownloadQuery, token: AccessToken) -> SubmitResult:
-        if query.direction is not Direction.RECIBIDOS:
-            raise NotImplementedError("EMITIDOS request mapping lands in a later commit")
+        # The signer's RFC is the taxpayer: EMITIDOS -> emisor, RECIBIDOS -> receptor.
+        if query.direction is Direction.EMITIDOS:
+            response = self._sat.recover_comprobante_emitted_request(
+                fecha_inicial=query.date_range.start,
+                fecha_final=query.date_range.end,
+                rfc_emisor=query.rfc_solicitante.value,
+                rfc_receptor=query.rfc_receptor.value if query.rfc_receptor is not None else None,
+                tipo_solicitud=_TIPO_SOLICITUD[query.request_type],
+                estado_comprobante=_ESTADO_COMPROBANTE[query.document_status],
+            )
+            return self._to_submit_result(response)
         response = self._sat.recover_comprobante_received_request(
             fecha_inicial=query.date_range.start,
             fecha_final=query.date_range.end,

@@ -48,6 +48,9 @@ class FakeSat:
     def recover_comprobante_received_request(self, **kwargs: object) -> dict[str, object]:
         return {"IdSolicitud": RID, "CodEstatus": "5000", "Mensaje": "Solicitud Aceptada"}
 
+    def recover_comprobante_emitted_request(self, **kwargs: object) -> dict[str, object]:
+        return {"IdSolicitud": RID, "CodEstatus": "5000", "Mensaje": "Solicitud Aceptada"}
+
     def recover_comprobante_status(self, id_solicitud: str) -> dict[str, object]:
         return {
             "EstadoSolicitud": 3,
@@ -69,6 +72,17 @@ def _query() -> DownloadQuery:
         date_range=DateRange(datetime(2026, 1, 1), datetime(2026, 1, 31)),
         rfc_solicitante=RFC,
         document_status=DocumentStatus.VIGENTE,
+    )
+
+
+def _query_emitidos() -> DownloadQuery:
+    return DownloadQuery(
+        service=ServiceType.CFDI,
+        direction=Direction.EMITIDOS,
+        request_type=RequestType.CFDI,
+        date_range=DateRange(datetime(2026, 1, 1), datetime(2026, 1, 31)),
+        rfc_solicitante=RFC,
+        document_status=DocumentStatus.TODOS,
     )
 
 
@@ -157,3 +171,10 @@ def test_download_returns_package_with_matching_id(gateway: SatGateway) -> None:
     package = gateway.download(pid, RFC, token)
     assert package.package_id == pid
     assert package.content
+
+
+def test_request_emitidos_returns_request_id(gateway: SatGateway) -> None:
+    token = gateway.authenticate(FakeIdentity())
+    result = gateway.request(_query_emitidos(), token)
+    assert result.request_id is not None
+    assert result.cod_estatus.value == "5000"
