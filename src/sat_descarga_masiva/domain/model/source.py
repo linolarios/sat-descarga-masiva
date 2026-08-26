@@ -39,3 +39,15 @@ def classify_incoming(incoming: SourceIdentity, known: dict[str, str]) -> Incomi
     if existing == incoming.sha256:
         return IncomingClassification.DUPLICATE
     return IncomingClassification.CONFLICT
+
+
+@dataclass(frozen=True)
+class ExtractedXml:
+    """One XML reproducibly derived from a package.
+
+    sha256 is the per-XML digest — the future `posting_snapshot.source_hash`.
+    """
+
+    uuid: str
+    tipo: str
+    sha256: str
