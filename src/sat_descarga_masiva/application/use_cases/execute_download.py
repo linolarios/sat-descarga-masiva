@@ -75,9 +75,10 @@ class ExecuteDownloadUseCase:
             # Existing contract: a non-COMPLETED terminal request yields no
             # packages (no exception). The request_id is still surfaced for
             # correlation/tracking.
-            return DownloadOutcome(request_id=request_id, packages=())
+            return DownloadOutcome(request_id=request_id, state=verification.state, packages=())
         return DownloadOutcome(
             request_id=request_id,
+            state=verification.state,
             packages=tuple(
                 self._downloader.download(package_id, query.rfc_solicitante, token)
                 for package_id in verification.ids_paquetes

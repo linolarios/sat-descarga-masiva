@@ -8,6 +8,7 @@ from sat_descarga_masiva.domain.enums.catalog import (
     RequestType,
     ServiceType,
 )
+from sat_descarga_masiva.domain.enums.request_state import RequestState
 from sat_descarga_masiva.domain.model.manifest import Manifest
 from sat_descarga_masiva.domain.model.query import DownloadQuery
 from sat_descarga_masiva.domain.model.results import DownloadOutcome, Package
@@ -72,7 +73,9 @@ def test_one_package_chains_download_to_ingest() -> None:
     content = b"PKzip"
     package = Package(PackageId(f"{RID}_01"), content)
     extracted = (ExtractedXml("u1", "ingreso", sha256_hex(b"<x/>")),)
-    executor = FakeExecutor(DownloadOutcome(request_id=RID, packages=(package,)))
+    executor = FakeExecutor(
+        DownloadOutcome(request_id=RID, state=RequestState.COMPLETED, packages=(package,))
+    )
     ingester = FakeIngester(result=extracted)
 
     result = _client(executor, ingester).download_and_ingest(_query())
@@ -95,7 +98,9 @@ def test_one_package_chains_download_to_ingest() -> None:
 def test_multiple_packages_each_get_own_manifest_in_order() -> None:
     p1 = Package(PackageId(f"{RID}_01"), b"zip1")
     p2 = Package(PackageId(f"{RID}_02"), b"zip2")
-    executor = FakeExecutor(DownloadOutcome(request_id=RID, packages=(p1, p2)))
+    executor = FakeExecutor(
+        DownloadOutcome(request_id=RID, state=RequestState.COMPLETED, packages=(p1, p2))
+    )
     ingester = FakeIngester(result=(ExtractedXml("u1", "ingreso", "h"),))
 
     _client(executor, ingester).download_and_ingest(_query())
@@ -110,7 +115,9 @@ def test_multiple_packages_each_get_own_manifest_in_order() -> None:
 
 
 def test_zero_packages_is_noop() -> None:
-    executor = FakeExecutor(DownloadOutcome(request_id=RID, packages=()))
+    executor = FakeExecutor(
+        DownloadOutcome(request_id=RID, state=RequestState.COMPLETED, packages=())
+    )
     ingester = FakeIngester()
 
     result = _client(executor, ingester).download_and_ingest(_query())

@@ -36,7 +36,8 @@ class Package:
 
 @dataclass(frozen=True)
 class DownloadOutcome:
-    """Result of ExecuteDownloadUseCase: the request id plus downloaded packages."""
+    """Result of ExecuteDownloadUseCase: terminal state, request id, packages."""
 
     request_id: RequestId
+    state: RequestState
     packages: tuple[Package, ...]
