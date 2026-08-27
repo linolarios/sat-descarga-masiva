@@ -19,7 +19,7 @@ from sat_descarga_masiva.domain.enums.request_state import RequestState
 from sat_descarga_masiva.domain.errors import SatTimeoutError, UnexpectedSatResponseError
 from sat_descarga_masiva.domain.model.credentials import SigningIdentity
 from sat_descarga_masiva.domain.model.query import DownloadQuery
-from sat_descarga_masiva.domain.model.results import Package, VerificationResult
+from sat_descarga_masiva.domain.model.results import DownloadOutcome, VerificationResult
 from sat_descarga_masiva.domain.model.token import AccessToken
 from sat_descarga_masiva.domain.model.value_objects import RequestId, Rfc
 
@@ -58,7 +58,7 @@ class ExecuteDownloadUseCase:
         self._polling = polling
         self._sleeper = sleeper
 
-    def execute(self, query: DownloadQuery) -> list[Package]:
+    def execute(self, query: DownloadQuery) -> DownloadOutcome:
         """Run the full auth -> submit -> verify -> download workflow."""
         token = self._auth.authenticate(self._identity)
         submitted = self._requests.request(query, token)
@@ -72,12 +72,17 @@ class ExecuteDownloadUseCase:
 
         verification = self._wait_for_resolution(request_id, query.rfc_solicitante, token)
         if verification.state is not RequestState.COMPLETED:
-            # Resolved but nothing to deliver: an expected outcome, not an error.
-            return []
-        return [
-            self._downloader.download(package_id, query.rfc_solicitante, token)
-            for package_id in verification.ids_paquetes
-        ]
+            # Existing contract: a non-COMPLETED terminal request yields no
+            # packages (no exception). The request_id is still surfaced for
+            # correlation/tracking.
+            return DownloadOutcome(request_id=request_id, packages=())
+        return DownloadOutcome(
+            request_id=request_id,
+            packages=tuple(
+                self._downloader.download(package_id, query.rfc_solicitante, token)
+                for package_id in verification.ids_paquetes
+            ),
+        )
 
     def _wait_for_resolution(
         self, request_id: RequestId, rfc: Rfc, token: AccessToken

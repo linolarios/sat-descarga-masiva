@@ -32,3 +32,11 @@ class Package:
 
     def __repr__(self) -> str:
         return f"Package(package_id={self.package_id!r}, bytes={len(self.content)})"
+
+
+@dataclass(frozen=True)
+class DownloadOutcome:
+    """Result of ExecuteDownloadUseCase: the request id plus downloaded packages."""
+
+    request_id: RequestId
+    packages: tuple[Package, ...]

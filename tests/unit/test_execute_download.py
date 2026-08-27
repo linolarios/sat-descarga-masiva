@@ -141,14 +141,17 @@ def _query() -> DownloadQuery:
 
 
 def test_workflow_returns_packages() -> None:
-    packages = build_uc(FakeVerifier()).execute(_query())
-    assert len(packages) == 1
-    assert packages[0].package_id == PackageId(f"{RID}_01")
+    outcome = build_uc(FakeVerifier()).execute(_query())
+    assert outcome.request_id == RequestId(RID)
+    assert len(outcome.packages) == 1
+    assert outcome.packages[0].package_id == PackageId(f"{RID}_01")
 
 
 def test_terminal_error_returns_no_packages() -> None:
     uc = build_uc(FakeVerifier(RequestState.ERROR), downloader=ExplodingDownloader())
-    assert uc.execute(_query()) == []
+    outcome = uc.execute(_query())
+    assert outcome.request_id == RequestId(RID)
+    assert outcome.packages == ()
 
 
 def test_raises_timeout_after_deadline() -> None:
