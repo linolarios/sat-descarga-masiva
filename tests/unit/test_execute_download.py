@@ -14,7 +14,7 @@ from sat_descarga_masiva.domain.enums.catalog import (
 )
 from sat_descarga_masiva.domain.enums.request_state import RequestState
 from sat_descarga_masiva.domain.enums.sat_status import SatStatusCode
-from sat_descarga_masiva.domain.errors import SatTimeoutError
+from sat_descarga_masiva.domain.errors import SatTimeoutError, UnexpectedSatResponseError
 from sat_descarga_masiva.domain.model.query import DownloadQuery
 from sat_descarga_masiva.domain.model.results import Package, SubmitResult, VerificationResult
 from sat_descarga_masiva.domain.model.token import AccessToken
@@ -60,6 +60,11 @@ class FakeAuth:
 class FakeRequests:
     def request(self, query: object, token: object) -> SubmitResult:
         return SubmitResult(RequestId(RID), SatStatusCode("5000"), "ok")
+
+
+class NoIdRequests:
+    def request(self, query: object, token: object) -> SubmitResult:
+        return SubmitResult(None, SatStatusCode("305"), "Certificado Inválido")
 
 
 class FakeVerifier:
@@ -114,11 +119,12 @@ def build_uc(
     clock: object | None = None,
     sleeper: FakeSleeper | None = None,
     downloader: object | None = None,
+    requests_gw: object | None = None,
 ) -> ExecuteDownloadUseCase:
     return ExecuteDownloadUseCase(
         identity=FakeIdentity(),
         auth=FakeAuth(),
-        requests_gw=FakeRequests(),
+        requests_gw=requests_gw if requests_gw is not None else FakeRequests(),
         verifier=verifier,
         downloader=downloader if downloader is not None else FakeDownloader(),
         repository=FakeRepo(),
@@ -169,3 +175,11 @@ def test_sleeps_with_backoff_between_polls() -> None:
     uc.execute(_query())
     assert len(sleeper.sleeps) == 2
     assert all(d == timedelta(0) for d in sleeper.sleeps)
+
+
+def test_raises_with_sat_status_when_request_has_no_id() -> None:
+    uc = build_uc(FakeVerifier(), requests_gw=NoIdRequests())
+    with pytest.raises(UnexpectedSatResponseError) as excinfo:
+        uc.execute(_query())
+    assert excinfo.value.cod_estatus == "305"
+    assert excinfo.value.mensaje == "Certificado Inválido"

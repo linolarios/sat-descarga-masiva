@@ -67,7 +67,11 @@ class ExecuteDownloadUseCase:
         if request_id is None:
             # Technical failure, not an expected SAT outcome:
             # the request must carry an id or the workflow cannot resume/track it.
-            raise UnexpectedSatResponseError("SAT request returned no request id")
+            raise UnexpectedSatResponseError(
+                "SAT request returned no request id",
+                cod_estatus=submitted.cod_estatus.value,
+                mensaje=submitted.mensaje,
+            )
         self._repository.save(request_id)
 
         verification = self._wait_for_resolution(request_id, query.rfc_solicitante, token)
