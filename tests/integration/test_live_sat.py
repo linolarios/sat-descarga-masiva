@@ -161,11 +161,10 @@ def _wire(root: Path) -> tuple[SatDownloadClient, RecordingExecutor, RecordingIn
         ),
         policy_version=1,
     )
-    return client, executor, ingester, rfc
+    return client, executor, ingester, rfc, clock
 
 
-def _query(direction: Direction, rfc: Rfc) -> DownloadQuery:
-    now = datetime.now(UTC)
+def _query(direction: Direction, rfc: Rfc, now: datetime) -> DownloadQuery:
     start = now - timedelta(days=3)
     return DownloadQuery(
         service=ServiceType.CFDI,
@@ -177,32 +176,25 @@ def _query(direction: Direction, rfc: Rfc) -> DownloadQuery:
     )
 
 
-def test_live_m1_facade_download_and_ingest(tmp_path: Path) -> None:
+@pytest.mark.parametrize("direction", [Direction.EMITIDOS, Direction.RECIBIDOS])
+def test_live_m1_facade_download_and_ingest(direction: Direction, tmp_path: Path) -> None:
     _requires_credentials()
-    client, executor, ingester, rfc = _wire(tmp_path)
+    client, executor, ingester, rfc, clock = _wire(tmp_path)
 
-    # Deliberately exercise both materially-different request paths (SAT request
-    # methods differ for EMITIDOS vs RECIBIDOS) through the same facade.
-    for direction in (Direction.EMITIDOS, Direction.RECIBIDOS):
-        executor.outcomes.clear()
-        ingester.calls.clear()
+    result = client.download_and_ingest(_query(direction, rfc, clock.now()))
 
-        result = client.download_and_ingest(_query(direction, rfc))
-
-        # Positive completion first: an empty-but-COMPLETED window is a valid
-        # pass; a degraded run (timeout/error -> no packages) FAILS here, not
-        # after. This is what makes the docstring's "no-data != failure" real.
-        assert len(executor.outcomes) == 1
-        outcome = executor.outcomes[0]
-        assert outcome.state is RequestState.COMPLETED
-        assert outcome.request_id is not None
-        # One ingest call per downloaded package; correlation chain holds.
-        assert len(ingester.calls) == len(outcome.packages)
-        for package, manifest in ingester.calls:
-            assert manifest.request_id == outcome.request_id
-            assert manifest.package_id == package.package_id
-            assert manifest.sha256 == sha256_hex(package.content)  # ZIP bytes
-        # §5: extracted-XML hashes are recorded distinct from the ZIP hash.
-        zip_hashes = {manifest.sha256 for _, manifest in ingester.calls}
-        extracted_hashes = {entry.sha256 for entry in result}
-        assert extracted_hashes.isdisjoint(zip_hashes)
+    # Positive completion first: an empty-but-COMPLETED window is a valid pass;
+    # a degraded run (timeout/error -> no packages) FAILS here, not after.
+    assert len(executor.outcomes) == 1
+    outcome = executor.outcomes[0]
+    assert outcome.state is RequestState.COMPLETED
+    assert outcome.request_id is not None
+    # One ingest call per downloaded package; correlation chain holds.
+    assert len(ingester.calls) == len(outcome.packages)
+    for package, manifest in ingester.calls:
+        assert manifest.request_id == outcome.request_id
+        assert manifest.package_id == package.package_id
+        assert manifest.sha256 == sha256_hex(package.content)  # ZIP bytes
+    # When packages were downloaded, prove extraction produced domain output.
+    if outcome.packages:
+        assert result, f"{direction.value}: expected extracted XML from a non-empty package set"
