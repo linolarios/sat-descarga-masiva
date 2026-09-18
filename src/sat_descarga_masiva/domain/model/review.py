@@ -13,6 +13,8 @@ from enum import StrEnum
 
 class ReviewFlagType(StrEnum):
     UNSUPPORTED_CURRENCY = "unsupported_currency"
+    PERSPECTIVE_MISMATCH = "perspective_mismatch"
+    PERSPECTIVE_UNDETERMINED = "perspective_undetermined"
 
 
 class ReviewFlagState(StrEnum):
