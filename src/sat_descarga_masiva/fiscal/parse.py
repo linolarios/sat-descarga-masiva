@@ -9,6 +9,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from sat_descarga_masiva.domain.model.fiscal_document import (
+    CfdiRelacionados,
     Concepto,
     FiscalDocument,
     FiscalDocumentStatus,
@@ -24,7 +25,7 @@ from sat_descarga_masiva.domain.model.raw_cfd import (
     RawImpuestos,
 )
 from sat_descarga_masiva.domain.model.review import ReviewFlag, ReviewFlags, ReviewFlagType
-from sat_descarga_masiva.domain.model.value_objects import Rfc
+from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
 from sat_descarga_masiva.domain.policy.money import (
     MoneyPolicy,
     NormalizedAmount,
@@ -39,6 +40,10 @@ def build_fiscal_document(
     policy = money if money is not None else MoneyPolicy()
     if raw.version != "4.0":
         return FiscalParseResult(outcome=ParseOutcome.FAILED, document=None)
+
+    # Identity and header facts are non-monetary: they survive an unsupported currency.
+    source_uuid = _source_uuid(raw)
+    relations = _cfdi_relacionados(raw)
 
     total = policy.normalize(raw.total, raw.moneda)
     if isinstance(total, UnsupportedCurrency):
@@ -57,6 +62,13 @@ def build_fiscal_document(
             status=FiscalDocumentStatus.UNKNOWN,
             review_flags=flags,
             source_hash=source_hash,
+            source_uuid=source_uuid,
+            subtotal=None,  # unnormalizable under an unsupported currency
+            descuento=None,
+            forma_pago=raw.forma_pago,
+            metodo_pago=raw.metodo_pago,
+            regimen_fiscal_receptor=raw.regimen_fiscal_receptor,
+            cfdi_relacionados=relations,
         )
         return FiscalParseResult(
             outcome=ParseOutcome.PARTIAL, document=document, review_flags=flags
@@ -77,8 +89,38 @@ def build_fiscal_document(
         status=FiscalDocumentStatus.UNKNOWN,
         review_flags=ReviewFlags(),
         source_hash=source_hash,
+        source_uuid=source_uuid,
+        subtotal=_optional_amount(raw.subtotal, raw.moneda, policy),
+        descuento=_optional_amount(raw.descuento, raw.moneda, policy),
+        forma_pago=raw.forma_pago,
+        metodo_pago=raw.metodo_pago,
+        regimen_fiscal_receptor=raw.regimen_fiscal_receptor,
+        cfdi_relacionados=relations,
     )
     return FiscalParseResult(outcome=ParseOutcome.PARSED, document=document)
+
+
+def _source_uuid(raw: RawCfd) -> Uuid | None:
+    """The TFD UUID, canonicalized. Never the source hash, filename or a generated id."""
+    return Uuid(raw.uuid) if raw.uuid is not None else None
+
+
+def _cfdi_relacionados(raw: RawCfd) -> tuple[CfdiRelacionados, ...]:
+    """Promote relation groups verbatim: group/uuid order kept, TipoRelacion as code."""
+    return tuple(
+        CfdiRelacionados(
+            tipo_relacion=group.tipo_relacion,
+            uuids=tuple(Uuid(value) for value in group.uuids),
+        )
+        for group in raw.cfdi_relacionados
+    )
+
+
+def _optional_amount(
+    value: str | None, currency: str, policy: MoneyPolicy
+) -> NormalizedAmount | None:
+    """An optional monetary fact. Absent stays absent; the caller guarantees support."""
+    return _amount(value, currency, policy) if value is not None else None
 
 
 def _decimal(value: str | None) -> Decimal | None:

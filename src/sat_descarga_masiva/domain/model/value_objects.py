@@ -30,6 +30,21 @@ class RequestId:
 
 
 @dataclass(frozen=True)
+class Uuid:
+    """A CFDI UUID (TFD) -- fiscal identity, canonicalized for reliable joins (§6).
+
+    The raw layer preserves the source representation verbatim; this value object
+    is the normalized fiscal-model identity used for UUID joins and dedup.
+    """
+
+    value: str
+
+    def __post_init__(self) -> None:
+        canonical = str(UUID(self.value)).upper()  # raises ValueError if malformed
+        object.__setattr__(self, "value", canonical)
+
+
+@dataclass(frozen=True)
 class PackageId:
     value: str
 

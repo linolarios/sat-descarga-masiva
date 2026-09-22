@@ -11,7 +11,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from sat_descarga_masiva.domain.model.review import ReviewFlags
-from sat_descarga_masiva.domain.model.value_objects import Rfc
+from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
 from sat_descarga_masiva.domain.policy.money import NormalizedAmount
 
 
@@ -60,6 +60,18 @@ class Impuestos:
 
 
 @dataclass(frozen=True)
+class CfdiRelacionados:
+    """One CfdiRelacionados group: a relation code plus its related UUIDs.
+
+    `tipo_relacion` stays the bare source code (01/04/07); what it means for
+    cancellation, substitution or accounting is decided downstream, not here.
+    """
+
+    tipo_relacion: str
+    uuids: tuple[Uuid, ...] = ()
+
+
+@dataclass(frozen=True)
 class FiscalDocument:
     tipo: str
     version: str
@@ -73,6 +85,13 @@ class FiscalDocument:
     source_hash: str
     status: FiscalDocumentStatus = FiscalDocumentStatus.UNKNOWN
     review_flags: ReviewFlags = field(default_factory=ReviewFlags)
+    source_uuid: Uuid | None = None
+    subtotal: NormalizedAmount | None = None
+    descuento: NormalizedAmount | None = None
+    forma_pago: str | None = None
+    metodo_pago: str | None = None
+    regimen_fiscal_receptor: str | None = None
+    cfdi_relacionados: tuple[CfdiRelacionados, ...] = ()
 
 
 @dataclass(frozen=True)
