@@ -72,6 +72,128 @@ class CfdiRelacionados:
 
 
 @dataclass(frozen=True)
+class TrasladoDR:
+    """One DoctoRelacionado transfer. Amounts are denominated in MonedaDR."""
+
+    base_dr: NormalizedAmount | None
+    impuesto_dr: str
+    tipo_factor_dr: str
+    tasa_o_cuota_dr: Decimal | None = None
+    importe_dr: NormalizedAmount | None = None
+
+
+@dataclass(frozen=True)
+class RetencionDR:
+    """One DoctoRelacionado retention. REP 2.0 omits BaseDR on this level."""
+
+    base_dr: NormalizedAmount | None
+    impuesto_dr: str
+    tipo_factor_dr: str
+    tasa_o_cuota_dr: Decimal
+    importe_dr: NormalizedAmount | None
+
+
+@dataclass(frozen=True)
+class ImpuestosDR:
+    """Document-level taxes for one related document (REP 2.0 ImpuestosDR).
+
+    Every element is kept in source order: aggregating by tax type/rate/factor
+    is downstream policy, never a blind `impuestos_dr[0]` selection.
+    """
+
+    traslados_dr: tuple[TrasladoDR, ...] = ()
+    retenciones_dr: tuple[RetencionDR, ...] = ()
+
+
+@dataclass(frozen=True)
+class TrasladoP:
+    """One payment-level transfer. Amounts are denominated in MonedaP."""
+
+    base_p: NormalizedAmount | None
+    impuesto_p: str
+    tipo_factor_p: str
+    tasa_o_cuota_p: Decimal | None = None
+    importe_p: NormalizedAmount | None = None
+
+
+@dataclass(frozen=True)
+class RetencionP:
+    """One RetencionesP entry: REP 2.0 carries ImpuestoP and ImporteP only."""
+
+    impuesto_p: str
+    importe_p: NormalizedAmount | None
+
+
+@dataclass(frozen=True)
+class ImpuestosP:
+    """Payment-level tax summary (REP 2.0 ImpuestosP).
+
+    Preserved as a source fact alongside the per-document ImpuestosDR; which
+    level is authoritative for accounting is a downstream policy decision.
+    """
+
+    traslados_p: tuple[TrasladoP, ...] = ()
+    retenciones_p: tuple[RetencionP, ...] = ()
+
+
+@dataclass(frozen=True)
+class DoctoRelacionado:
+    """One CFDI related to one REP payment.
+
+    `uuid` is the UUID of the document being paid — distinct from
+    FiscalDocument.source_uuid, which identifies the REP itself. Amounts are
+    denominated in MonedaDR and are preserved exactly as sourced: the
+    ImpSaldoAnt - ImpPagado == ImpSaldoInsoluto invariant is not checked here.
+    """
+
+    uuid: Uuid
+    moneda_dr: str
+    num_parcialidad: int
+    imp_saldo_ant: NormalizedAmount | None
+    imp_pagado: NormalizedAmount | None
+    imp_saldo_insoluto: NormalizedAmount | None
+    objeto_imp_dr: str
+    equivalencia_dr: Decimal | None = None
+    serie: str | None = None
+    folio: str | None = None
+    impuestos_dr: ImpuestosDR | None = None
+
+
+@dataclass(frozen=True)
+class Pago:
+    """One Pago element. Multiple payments are never flattened into one.
+
+    `monto` and all ImpuestosP amounts are denominated in `moneda_p`, which is
+    independent of the comprobante header currency.
+    """
+
+    fecha_pago: str
+    forma_de_pago_p: str
+    moneda_p: str
+    monto: NormalizedAmount | None
+    tipo_cambio_p: Decimal | None = None
+    num_operacion: str | None = None
+    doctos_relacionados: tuple[DoctoRelacionado, ...] = ()
+    impuestos_p: ImpuestosP | None = None
+
+
+@dataclass(frozen=True)
+class TotalesPagos:
+    """REP 2.0 Totales. MontoTotalPagos is expressed in national currency."""
+
+    monto_total_pagos: NormalizedAmount | None = None
+
+
+@dataclass(frozen=True)
+class Pagos20:
+    """The Pagos 2.0 complemento carried by a P (pago) comprobante."""
+
+    version: str
+    pagos: tuple[Pago, ...] = ()
+    totales: TotalesPagos | None = None
+
+
+@dataclass(frozen=True)
 class FiscalDocument:
     tipo: str
     version: str
@@ -92,6 +214,7 @@ class FiscalDocument:
     metodo_pago: str | None = None
     regimen_fiscal_receptor: str | None = None
     cfdi_relacionados: tuple[CfdiRelacionados, ...] = ()
+    pagos: Pagos20 | None = None
 
 
 @dataclass(frozen=True)

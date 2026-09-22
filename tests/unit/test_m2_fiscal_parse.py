@@ -77,15 +77,17 @@ def test_nomina_parses() -> None:
     assert result.document.total == NormalizedAmount(Decimal("8500.00"))
 
 
-def test_pago_receipt_unsupported_currency() -> None:
+def test_pago_receipt_xxx_header_is_not_an_unsupported_currency() -> None:
+    """M2.4b: CFDI mandates Moneda=XXX on a type-P comprobante, which has no total."""
     raw, result = _parse_build("cfdi_pago_4_0.xml")
     assert raw.tipo == "P"
     assert raw.moneda == "XXX"
-    assert result.outcome is ParseOutcome.PARTIAL
+    assert result.outcome is ParseOutcome.PARSED
     doc = result.document
     assert doc is not None
     assert doc.total is None
-    assert doc.review_flags.has_open(ReviewFlagType.UNSUPPORTED_CURRENCY) is True
+    assert doc.subtotal is None
+    assert doc.review_flags.has_open(ReviewFlagType.UNSUPPORTED_CURRENCY) is False
 
 
 def test_unsupported_currency_eur_flags_and_nulls_total() -> None:

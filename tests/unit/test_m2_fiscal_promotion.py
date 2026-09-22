@@ -250,11 +250,18 @@ def test_unsupported_currency_nulls_monetary_facts_and_keeps_flag() -> None:
     assert doc.review_flags.has_open(ReviewFlagType.UNSUPPORTED_CURRENCY) is True
 
 
-def test_type_p_unsupported_header_currency_nulls_monetary_facts() -> None:
-    doc = _doc("cfdi_pago_4_0.xml")
+def test_type_p_xxx_header_is_not_an_unsupported_currency() -> None:
+    """M2.4b: XXX on a P comprobante is the CFDI-mandated "no monetary total" code."""
+    raw, result = _build("cfdi_pago_4_0.xml")
+    assert raw.tipo == "P"
+    assert raw.moneda == "XXX"
+    assert result.outcome is ParseOutcome.PARSED
+    doc = result.document
+    assert doc is not None
+    assert doc.total is None
     assert doc.subtotal is None
     assert doc.descuento is None
-    assert doc.review_flags.has_open(ReviewFlagType.UNSUPPORTED_CURRENCY) is True
+    assert doc.review_flags.has_open(ReviewFlagType.UNSUPPORTED_CURRENCY) is False
 
 
 def test_non_monetary_facts_survive_unsupported_currency() -> None:
@@ -320,7 +327,9 @@ def test_existing_field_order_is_unchanged() -> None:
         "source_hash",
     ]
     assert names[10:12] == ["status", "review_flags"]
-    assert names[12:] == list(_NEW_FIELDS)
+    assert names[12:19] == list(_NEW_FIELDS)
+    # M2.4b appends `pagos` last so every earlier position is untouched.
+    assert names[19:] == ["pagos"]
 
 
 def test_no_second_uuid_field_was_introduced() -> None:
