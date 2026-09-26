@@ -15,6 +15,7 @@ class ReviewFlagType(StrEnum):
     UNSUPPORTED_CURRENCY = "unsupported_currency"
     PERSPECTIVE_MISMATCH = "perspective_mismatch"
     PERSPECTIVE_UNDETERMINED = "perspective_undetermined"
+    CFDI_SIGNATURE = "cfdi_signature"
 
 
 class ReviewFlagState(StrEnum):
