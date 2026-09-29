@@ -41,3 +41,22 @@ def test_closing_does_not_mutate_original() -> None:
     original.close_open(ReviewFlagType.UNSUPPORTED_CURRENCY)
     # Nothing posted is mutated (trivially true in M2); the original is unchanged.
     assert original.has_open(ReviewFlagType.UNSUPPORTED_CURRENCY) is True
+
+
+def test_flags_merge_additively_keeping_every_source_flag() -> None:
+    currency = ReviewFlags().with_flag(ReviewFlag(ReviewFlagType.UNSUPPORTED_CURRENCY, "EUR"))
+    signature = ReviewFlags().with_flag(ReviewFlag(ReviewFlagType.CFDI_SIGNATURE, "no sello"))
+    mismatch = ReviewFlags().with_flag(ReviewFlag(ReviewFlagType.PERSPECTIVE_MISMATCH, "neither"))
+    merged = currency.merged_with(signature, mismatch)
+    assert merged.count(ReviewFlagType.UNSUPPORTED_CURRENCY) == 1
+    assert merged.count(ReviewFlagType.CFDI_SIGNATURE) == 1
+    assert merged.count(ReviewFlagType.PERSPECTIVE_MISMATCH) == 1
+    # Additive union: no source erases another, and no source is itself mutated.
+    assert currency.count(ReviewFlagType.CFDI_SIGNATURE) == 0
+    assert merged.open_of(ReviewFlagType.UNSUPPORTED_CURRENCY)[0].reason == "EUR"
+
+
+def test_merging_with_nothing_is_the_same_review_state() -> None:
+    flags = ReviewFlags().with_flag(ReviewFlag(ReviewFlagType.CFDI_SIGNATURE, "absent"))
+    assert flags.merged_with() == flags
+    assert ReviewFlags().merged_with() == ReviewFlags()

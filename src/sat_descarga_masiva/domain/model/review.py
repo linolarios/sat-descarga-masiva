@@ -98,3 +98,17 @@ class ReviewFlags:
                 for f in self._flags
             )
         )
+
+    def merged_with(self, *others: ReviewFlags) -> ReviewFlags:
+        """Union of review state: no producer's flags can erase another's (§8).
+
+        M2.6 composes flags observed independently — by the parser (money), by the
+        perspective resolution, and by the signature verification. Merging is
+        additive and total: every source keeps every flag it opened, the sources
+        themselves are untouched, order is producer order (deterministic), and
+        merging no sources preserves the same logical review state.
+        """
+        flags = self._flags
+        for other in others:
+            flags = (*flags, *other._flags)
+        return ReviewFlags(flags)
