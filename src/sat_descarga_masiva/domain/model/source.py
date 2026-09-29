@@ -6,6 +6,8 @@ import hashlib
 from dataclasses import dataclass
 from enum import Enum
 
+from sat_descarga_masiva.domain.errors import SourceIntegrityError
+
 
 class IncomingClassification(Enum):
     NEW = "new"
@@ -51,3 +53,18 @@ class ExtractedXml:
     uuid: str
     tipo: str
     sha256: str
+
+
+def verify_source_integrity(data: bytes, expected_sha256: str) -> None:
+    """Assert stored bytes still hash to the digest the record claims (§6a.2).
+
+    Store integrity only: it proves *our* copy did not change since it was
+    recorded, and never claims the CFDI itself is authentic (§6a.3). Callers
+    re-read the stored ZIP or extracted XML they are about to trust, so tampering
+    surfaces as a failure instead of silently feeding a downstream parse.
+    """
+    actual = sha256_hex(data)
+    if actual != expected_sha256:
+        raise SourceIntegrityError(
+            f"stored artifact hash mismatch: recorded {expected_sha256}, found {actual}"
+        )

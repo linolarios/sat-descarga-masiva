@@ -48,6 +48,15 @@ class SourceHashConflict(SatClientError):
     """An immutable record already exists for that identity with other content."""
 
 
+class SourceIntegrityError(SatClientError):
+    """A stored artifact no longer hashes to the digest its manifest records.
+
+    This is **store** integrity (AGENT.md §6a.2): evidence we wrote has changed
+    underneath us. It says nothing about SAT authenticity (§6a.3), which the
+    signature verifier owns.
+    """
+
+
 class ImmutableRecordConflict(SatClientError):
     """Refusing to rewrite an append-only/versioned record in place."""
 

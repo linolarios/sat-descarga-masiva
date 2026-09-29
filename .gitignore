@@ -5,6 +5,8 @@
 *.pfx
 *.p12
 *.zip
+# ...except the committed tier-2 package fixture (deterministic, no real taxpayer data):
+!tests/fixtures/*.zip
 .env
 secrets/
 certificados/

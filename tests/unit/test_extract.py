@@ -94,3 +94,30 @@ def test_extraction_is_idempotent(tmp_path) -> None:
     extractor = SafeZipExtractor(tmp_path, POLICY)
     assert extractor.extract(_pid(), content) == extractor.extract(_pid(), content)
     assert len(list((tmp_path / "extracted").rglob("*.xml"))) == 1
+
+
+def test_rejects_a_single_entry_over_the_size_limit(tmp_path) -> None:
+    """A per-entry bound: one member alone may not exceed the package budget."""
+    policy = ExtractionPolicy(max_total_bytes=10, max_entries=100)
+    content = _zip([(f"{UUID1}.xml", b"x" * 20)])
+    with pytest.raises(ExtractionError, match="exceeds max_total_bytes"):
+        SafeZipExtractor(tmp_path, policy).extract(_pid(), content)
+
+
+def test_empty_path_guard_is_unreachable_through_extract(tmp_path) -> None:
+    """The empty-path guard cannot fire via the public API: only `.xml` members reach it.
+
+    `extract` skips every member that does not end in `.xml` *before* calling
+    `_reject_unsafe_path`, and the empty path cannot end in `.xml`. The guard is therefore
+    dead defensive code: pinned here by calling it directly, and flagged for deletion.
+    """
+    content = _zip([("", INGRESO)])  # zipfile accepts an empty member name
+    assert SafeZipExtractor(tmp_path, POLICY).extract(_pid(), content) == ()
+
+    with pytest.raises(ExtractionError, match="empty path"):
+        SafeZipExtractor._reject_unsafe_path("", "")
+
+
+def test_unsafe_path_guard_admits_a_plain_relative_xml_path(tmp_path) -> None:
+    """Positive control for the guard: a normal member name is untouched by it."""
+    SafeZipExtractor._reject_unsafe_path(f"{UUID1}.xml", f"{UUID1}.xml")

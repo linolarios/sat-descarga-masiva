@@ -64,6 +64,22 @@ class FakeSat:
         return ({"CodEstatus": "5000"}, base64.b64encode(b"PK\x03\x04zip").decode("ascii"))
 
 
+class FakeSatEmpty(FakeSat):
+    """The same SAT double, whose completed request has no package list at all (§6).
+
+    satcfdi omits `IdsPaquetes` when a completed request carries no packages, so the
+    adapter must default it instead of assuming the key is present.
+    """
+
+    def recover_comprobante_status(self, id_solicitud: str) -> dict[str, object]:
+        return {
+            "EstadoSolicitud": 3,
+            "CodEstatus": "5000",
+            "NumeroCFDIs": 0,
+            "Mensaje": "Solicitud Aceptada",
+        }
+
+
 def _query() -> DownloadQuery:
     return DownloadQuery(
         service=ServiceType.CFDI,
@@ -140,6 +156,36 @@ GATEWAY_FACTORIES = [
 ]
 
 
+class FakeSatGatewayEmptyPackages(FakeSatGateway):
+    """The same double, whose request completed with nothing left to download."""
+
+    def verify(self, request_id: RequestId, rfc: Rfc, token: AccessToken) -> VerificationResult:
+        return VerificationResult(
+            state=RequestState.COMPLETED,
+            cod_estatus=SatStatusCode("5000"),
+            numero_cfdis=0,
+            mensaje="Solicitud Aceptada",
+            ids_paquetes=(),
+        )
+
+
+def _satcfdi_empty_factory() -> SatcfdiGateway:
+    """SatcfdiGateway over a SAT double whose response carries no package list."""
+    return SatcfdiGateway(sat=FakeSatEmpty(), signer=FakeIdentity(), clock=FakeClock())
+
+
+# The same behavior assertions, for the "completed, no packages" response shape (§6).
+EMPTY_GATEWAY_FACTORIES = [
+    pytest.param(FakeSatGatewayEmptyPackages, id="FakeSatGateway"),
+    pytest.param(_satcfdi_empty_factory, id="SatcfdiGateway"),
+]
+
+
+@pytest.fixture(params=EMPTY_GATEWAY_FACTORIES)
+def empty_gateway(request: pytest.FixtureRequest) -> SatGateway:
+    return cast(SatGateway, request.param())
+
+
 @pytest.fixture(params=GATEWAY_FACTORIES)
 def gateway(request: pytest.FixtureRequest) -> SatGateway:
     return cast(SatGateway, request.param())
@@ -178,3 +224,15 @@ def test_request_emitidos_returns_request_id(gateway: SatGateway) -> None:
     result = gateway.request(_query_emitidos(), token)
     assert result.request_id is not None
     assert result.cod_estatus.value == "5000"
+
+
+def test_verify_with_no_packages_is_completed_with_zero_packages(
+    empty_gateway: SatGateway,
+) -> None:
+    """ "Nothing to download yet" is a completed empty result, never a failure (§6)."""
+    token = empty_gateway.authenticate(FakeIdentity())
+    result = empty_gateway.verify(RequestId(RID), RFC, token)
+    assert result.state is RequestState.COMPLETED
+    assert result.cod_estatus.value == "5000"
+    assert result.ids_paquetes == ()
+    assert result.numero_cfdis == 0
