@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from sat_descarga_masiva.domain.model.contributor import (
     PersonaTipo,
@@ -11,6 +11,21 @@ from sat_descarga_masiva.domain.model.contributor import (
     SituacionFiscal,
 )
 from sat_descarga_masiva.domain.model.value_objects import Rfc
+
+
+@dataclass(frozen=True)
+class CsfArtifact:
+    """The stored CSF as an immutable source artifact (§7a).
+
+    §7a: the CSF is "an **immutable source artifact**: hash it (`csf_hash`,
+    SHA-256), retain the original, never modify it". ``stored_path`` is the
+    location of the retained original; the record is keyed by its content hash,
+    so the same constancia can never be repointed or quietly replaced.
+    """
+
+    sha256: str
+    stored_path: str
+    recorded_at: datetime
 
 
 @dataclass(frozen=True)

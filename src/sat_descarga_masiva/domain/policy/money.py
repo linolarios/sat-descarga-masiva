@@ -42,3 +42,24 @@ class MoneyPolicy:
         return NormalizedAmount(
             amount=Decimal(str(amount)).quantize(quant, rounding=self._ROUNDING)
         )
+
+
+def amount_as_text(amount: NormalizedAmount) -> str:
+    """Canonical TEXT form of a normalized amount — the only money serializer.
+
+    Persistence stores money as TEXT, never REAL/FLOAT (§4: "`float` is
+    prohibited in fiscal/accounting code"). ``format(value, "f")`` is used
+    instead of ``str()`` because ``str(Decimal("1E+2"))`` is ``"1E+2"``:
+    a scientific-notation amount would round-trip as a *string* while breaking
+    exact text comparison in queries. The scale is preserved verbatim — rounding
+    is `MoneyPolicy.normalize`'s job, not the codec's.
+    """
+    return format(amount.amount, "f")
+
+
+def amount_from_text(text: str) -> NormalizedAmount:
+    """Inverse of :func:`amount_as_text`: ``Decimal`` straight from the text.
+
+    Never via ``float`` (that is where precision is lost), per §4.
+    """
+    return NormalizedAmount(Decimal(text))

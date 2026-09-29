@@ -3,11 +3,17 @@
 Review state is orthogonal to FiscalDocumentStatus (SAT fact) and to processing
 lifecycle. A flag is attached at parse time; the PostingEligibilityValidator
 (M3) independently refuses to post a document with an open flag.
+
+Persisted facts are additive (§11 M2 `review_flags`): opening a flag appends a
+row, closing it appends *another* row that points at the open one. No row is
+ever updated in place, so "does this document have unresolved review flags?"
+(§11 M3) is answerable from the facts alone.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 
@@ -23,6 +29,18 @@ class ReviewFlagState(StrEnum):
     CLOSED = "closed"
 
 
+class ReviewSubjectKind(StrEnum):
+    """What a persisted review fact is attached to.
+
+    M2 has exactly one producer of persisted flags — the per-document fiscal
+    review (M2.6) — so only ``DOCUMENT`` exists today. §8's entries are the same
+    shape and extend this column additively (the value is stored as TEXT), so
+    nothing is built here for M3.
+    """
+
+    DOCUMENT = "document"
+
+
 @dataclass(frozen=True)
 class ReviewFlag:
     flag_type: ReviewFlagType
@@ -32,6 +50,25 @@ class ReviewFlag:
     def closed(self) -> ReviewFlag:
         """Return a NEW flag with CLOSED state (additive; never mutates)."""
         return ReviewFlag(self.flag_type, self.reason, ReviewFlagState.CLOSED)
+
+
+@dataclass(frozen=True)
+class ReviewFlagRecord:
+    """One persisted review fact: an *opening* row or a *closing* row (§8).
+
+    ``closes_flag_id is None`` marks the row that opened the flag (its ``flag``
+    is OPEN). A closing row carries ``closes_flag_id = <opening flag_id>`` and a
+    CLOSED ``flag`` — the persisted form of :meth:`ReviewFlag.closed`. Current
+    state is therefore reconstructed from the facts: an opening row is open
+    exactly while no closing row references it.
+    """
+
+    flag_id: int
+    subject_kind: ReviewSubjectKind
+    subject_id: str
+    flag: ReviewFlag
+    occurred_at: datetime
+    closes_flag_id: int | None = None
 
 
 @dataclass(frozen=True)

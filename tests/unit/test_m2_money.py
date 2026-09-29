@@ -8,6 +8,8 @@ from sat_descarga_masiva.domain.policy.money import (
     MoneyPolicy,
     NormalizedAmount,
     UnsupportedCurrency,
+    amount_as_text,
+    amount_from_text,
 )
 
 POLICY = MoneyPolicy()
@@ -45,3 +47,23 @@ def test_unsupported_currency_has_no_numeric_interface() -> None:
         Decimal(result)  # no Decimal coercion
     with pytest.raises(TypeError):
         result + Decimal("1")  # no arithmetic path
+
+
+# --- canonical Decimal <-> TEXT codec (persistence, §4 MoneyPolicy) -----------
+
+
+def test_amount_text_is_fixed_point_never_scientific() -> None:
+    assert amount_as_text(NormalizedAmount(Decimal("1E+2"))) == "100"
+    assert amount_as_text(NormalizedAmount(Decimal("0.10"))) == "0.10"
+    assert "E" not in amount_as_text(NormalizedAmount(Decimal("1E+2")))
+
+
+def test_amount_text_preserves_the_decimal_scale_without_quantizing() -> None:
+    # Rounding is MoneyPolicy's job; the codec must not silently re-quantize.
+    assert amount_as_text(NormalizedAmount(Decimal("1.005"))) == "1.005"
+
+
+def test_amount_text_round_trip_is_exact() -> None:
+    for value in ("0.00", "123456789.01", "-12.34", "1000000.00"):
+        normal = NormalizedAmount(Decimal(value))
+        assert amount_from_text(amount_as_text(normal)) == normal

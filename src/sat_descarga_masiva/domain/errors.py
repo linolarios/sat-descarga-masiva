@@ -44,7 +44,16 @@ class UnexpectedSatResponseError(SatClientError):
 class ExtractionError(SatClientError): ...
 
 
-class SourceHashConflict(SatClientError): ...
+class SourceHashConflict(SatClientError):
+    """An immutable record already exists for that identity with other content."""
+
+
+class ImmutableRecordConflict(SatClientError):
+    """Refusing to rewrite an append-only/versioned record in place."""
+
+
+class ReviewFlagNotFound(SatClientError):
+    """A review flag id does not identify an open flag row."""
 
 
 class CsfParseError(SatClientError): ...

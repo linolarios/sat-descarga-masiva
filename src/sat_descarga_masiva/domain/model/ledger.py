@@ -11,6 +11,8 @@ from sat_descarga_masiva.domain.model.value_objects import RequestId, Rfc
 
 
 class JobStatus(StrEnum):
+    """Processing-state vocabulary, shared by download jobs and pipeline runs."""
+
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -29,3 +31,4 @@ class DownloadJob:
     status: JobStatus
     created_at: datetime
     completed_at: datetime | None = None
+    pipeline_run_id: str | None = None
