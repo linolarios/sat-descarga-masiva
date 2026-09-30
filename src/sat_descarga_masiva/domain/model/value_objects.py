@@ -57,3 +57,24 @@ class DateRange:
     def __post_init__(self) -> None:
         if self.start > self.end:
             raise ValueError("DateRange.start must be <= end")
+
+
+_PERIOD = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+@dataclass(frozen=True)
+class Period:
+    """An ``YYYY-MM`` fiscal period (§7/§9).
+
+    §7 and §9 both speak in monthly periods and AGENT.md warns not to invent period
+    semantics, so this value object owns exactly one rule: the period is a calendar
+    month written ``YYYY-MM``. It is deliberately *not* a date range and carries no
+    notion of "which documents belong to it" — selecting artifacts is not the
+    orchestration's decision (§7's process flow operates on the set it is given).
+    """
+
+    value: str
+
+    def __post_init__(self) -> None:
+        if not _PERIOD.match(self.value):
+            raise ValueError(f"invalid period: {self.value!r} (expected YYYY-MM)")
