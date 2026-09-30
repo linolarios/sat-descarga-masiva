@@ -43,6 +43,40 @@ def test_closing_does_not_mutate_original() -> None:
     assert original.has_open(ReviewFlagType.UNSUPPORTED_CURRENCY) is True
 
 
+def test_open_flags_enumerates_every_open_flag_in_insertion_order() -> None:
+    """M2.8 persists the durable review state, so it must be enumerable (order = producer)."""
+    flags = (
+        ReviewFlags()
+        .with_flag(ReviewFlag(ReviewFlagType.UNSUPPORTED_CURRENCY, "EUR"))
+        .with_flag(ReviewFlag(ReviewFlagType.CFDI_SIGNATURE, "no sello"))
+    )
+    assert [flag.flag_type for flag in flags.open_flags()] == [
+        ReviewFlagType.UNSUPPORTED_CURRENCY,
+        ReviewFlagType.CFDI_SIGNATURE,
+    ]
+
+
+def test_open_flags_excludes_closed_flags() -> None:
+    flags = (
+        ReviewFlags()
+        .with_flag(ReviewFlag(ReviewFlagType.UNSUPPORTED_CURRENCY, "EUR"))
+        .with_flag(ReviewFlag(ReviewFlagType.CFDI_SIGNATURE, "no sello"))
+        .close_open(ReviewFlagType.UNSUPPORTED_CURRENCY)
+    )
+    assert [flag.flag_type for flag in flags.open_flags()] == [ReviewFlagType.CFDI_SIGNATURE]
+
+
+def test_open_flags_is_empty_without_review_state() -> None:
+    assert ReviewFlags().open_flags() == ()
+
+
+def test_open_flags_never_mutates_the_review_state() -> None:
+    flags = ReviewFlags().with_flag(ReviewFlag(ReviewFlagType.CFDI_SIGNATURE, "no sello"))
+    flags.open_flags()
+    assert flags.has_open(ReviewFlagType.CFDI_SIGNATURE) is True
+    assert flags.count(ReviewFlagType.CFDI_SIGNATURE) == 1
+
+
 def test_flags_merge_additively_keeping_every_source_flag() -> None:
     currency = ReviewFlags().with_flag(ReviewFlag(ReviewFlagType.UNSUPPORTED_CURRENCY, "EUR"))
     signature = ReviewFlags().with_flag(ReviewFlag(ReviewFlagType.CFDI_SIGNATURE, "no sello"))

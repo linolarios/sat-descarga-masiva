@@ -85,6 +85,15 @@ class ReviewFlags:
             f for f in self._flags if f.state is ReviewFlagState.OPEN and f.flag_type is flag_type
         )
 
+    def open_flags(self) -> tuple[ReviewFlag, ...]:
+        """Every OPEN flag, in producer order — the durable review state (§8).
+
+        M2.8 persists exactly these facts, once each: they are the review state a
+        projected document actually claims. Closed flags are history, not state, so
+        they are not returned; the flags themselves are never mutated.
+        """
+        return tuple(f for f in self._flags if f.state is ReviewFlagState.OPEN)
+
     def has_open(self, flag_type: ReviewFlagType) -> bool:
         return bool(self.open_of(flag_type))
 

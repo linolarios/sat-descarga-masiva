@@ -19,3 +19,16 @@ class PackageExtractor(Protocol):
     """Safe, bound, re-runnable extraction of a downloaded package (AGENT.md §6a #4)."""
 
     def extract(self, package_id: PackageId, content: bytes) -> tuple[ExtractedXml, ...]: ...
+
+
+class ExtractedXmlReader(Protocol):
+    """Re-read the EXACT bytes of one extracted XML artifact (M2.8, §6a.2).
+
+    Addressed by the artifact's own identity (``tipo`` + ``uuid``) — never by
+    scanning a directory — and the bytes must still hash to the recorded
+    ``sha256`` before any consumer sees them, so a file that changed underneath us
+    (or a path smuggled out of the extraction root) fails with ``ExtractionError``
+    instead of silently feeding a parse.
+    """
+
+    def read(self, artifact: ExtractedXml) -> bytes: ...

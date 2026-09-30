@@ -671,11 +671,16 @@ class SqliteDocumentRepository:
     delete and reinsert the row (and later cascade an FK delete) — and the
     identity fields stay write-once. A same-UUID/different-hash save is an
     integrity conflict (§6) and the stored row is left untouched.
+
+    ``commit=False`` makes the write durable only when an explicit unit of work
+    (M2.8's per-document transaction) says so: this repository's own COMMIT would
+    otherwise end that unit early.
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, *, commit: bool = True) -> None:
         conn.row_factory = sqlite3.Row
         self._conn = conn
+        self._commit_writes = commit
         self._conn.execute(_CREATE_DOCUMENTS)
 
     def save(self, record: DocumentRecord) -> None:
@@ -703,7 +708,7 @@ class SqliteDocumentRepository:
                     incoming.last_run_id,
                 ),
             )
-            self._conn.commit()
+            self._commit_write()
             return
         if existing["source_hash"] != incoming.source_hash:
             raise SourceHashConflict(
@@ -717,11 +722,15 @@ class SqliteDocumentRepository:
                 incoming.uuid.value,
             ),
         )
-        self._conn.commit()
+        self._commit_write()
 
     def get(self, uuid: Uuid) -> DocumentRecord | None:
         row = self._conn.execute(_SELECT_DOCUMENT, (uuid.value,)).fetchone()
         return None if row is None else _document_from_row(row)
+
+    def _commit_write(self) -> None:
+        if self._commit_writes:
+            self._conn.commit()
 
 
 class SqliteFiscalEventStore:
@@ -853,11 +862,16 @@ class SqliteReviewFlagStore:
     The opening row is never updated: closing inserts a second row whose
     ``closes_flag_id`` (UNIQUE) points at it, so an accidental double closure
     cannot duplicate the fact.
+
+    ``commit=False`` makes the fact durable only when an explicit unit of work
+    (M2.8's per-document transaction) says so, so a flag and the document it
+    belongs to can never survive one another.
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, *, commit: bool = True) -> None:
         conn.row_factory = sqlite3.Row
         self._conn = conn
+        self._commit_writes = commit
         self._conn.execute(_CREATE_REVIEW_FLAGS)
 
     def open_flag(
@@ -880,7 +894,7 @@ class SqliteReviewFlagStore:
                 None,
             ),
         )
-        self._conn.commit()
+        self._commit_write()
         return self._row(cursor.lastrowid)
 
     def close_flag(self, *, flag_id: int, occurred_at: datetime) -> ReviewFlagRecord:
@@ -903,7 +917,7 @@ class SqliteReviewFlagStore:
                 flag_id,
             ),
         )
-        self._conn.commit()
+        self._commit_write()
         return self._row(cursor.lastrowid)
 
     def open_flags(
@@ -925,6 +939,10 @@ class SqliteReviewFlagStore:
         if row is None:  # pragma: no cover - the row was just inserted
             raise ReviewFlagNotFound(f"no review flag with flag_id {flag_id}")
         return _flag_from_row(row)
+
+    def _commit_write(self) -> None:
+        if self._commit_writes:
+            self._conn.commit()
 
 
 class SqlitePipelineRunRepository:
