@@ -1,4 +1,4 @@
-# AGENT.md — SAT-CFDI Accounting Tool (single source of truth · v1.3.3)
+# AGENT.md — SAT-CFDI Accounting Tool (single source of truth · v1.3.4)
 
 > **This is the only guide.** Everything the agent needs is here — architecture, the SAT library decision, the accounting rules, the CLI flows, the build order, and per-milestone task notes. There are no separate `ARCHITECTURE.md`/`ACCOUNTING.md` files and no out-of-band prompts.
 >
@@ -49,7 +49,8 @@ src/sat_descarga_masiva/
 ├── source/        # immutable raw artifacts (append-only) + derived extraction/classification/dedup
 ├── fiscal/        # parse CFDI 4.0 → typed model; derive fiscal state
 ├── contabilidad/  # deterministic rules 4.1–4.15 → ProposedJournalEntry (+ PostingEligibilityValidator)
-├── ledger/        # application PORTS (repositories/projections)
+│                  # "ledger" = the accounting-record layer, NOT a package: its PORTS live in
+│                  # application/ports/ (e.g. accounting.py), its adapters in infrastructure/persistence/
 ├── export/        # Excel renderer (ledger projection → xlsx)
 ├── diot/          # DIOT projection → SAT bulk-load .txt
 ├── recon/         # conservation checks
@@ -57,7 +58,7 @@ src/sat_descarga_masiva/
 └── cli/           # thin: parse/validate/load config/invoke use case/render — NO business logic
 ```
 
-**Domain responsibilities (keep these from bleeding into each other):** `fiscal/` = *who is the taxpayer?* (identity: RFC, PersonaTipo, régimen, `ContributorProfile` from the CSF) · `contabilidad/` = *how do we account for a transaction?* · `ledger/` = *what was recorded?* · `infrastructure/` = *how do we talk to SAT?*. Contributor identity is a **fiscal** concept and must never migrate into `contabilidad/`.
+**Domain responsibilities (keep these from bleeding into each other):** `fiscal/` = *who is the taxpayer?* (identity: RFC, PersonaTipo, régimen, `ContributorProfile` from the CSF) · `contabilidad/` = *how do we account for a transaction?* · `ledger` (the accounting-record layer) = *what was recorded?* · `infrastructure/` = *how do we talk to SAT?*. Contributor identity is a **fiscal** concept and must never migrate into `contabilidad/`.
 
 **Dependency rules (enforceable):**
 1. `domain` imports only stdlib/domain abstractions.
@@ -70,7 +71,7 @@ src/sat_descarga_masiva/
 8. `ai` is optional and has **no authority** over deterministic accounting.
 9. `facade` is the public seam for SAT ingestion.
 
-**Persistence rule:** `ledger/` exposes application **ports** (repositories/projections). SQLite implementations live in `infrastructure/persistence/`. `domain`, `fiscal`, `contabilidad` **never** import `sqlite3`/SQLAlchemy/concrete adapters.
+**Persistence rule:** accounting/persistence **ports** (repositories/projections) live in `application/ports/`; SQLite implementations live in `infrastructure/persistence/`. There is **no `ledger/` package** — "ledger" names the accounting-record *layer*, not a directory. `domain`, `fiscal`, `contabilidad` **never** import `sqlite3`/SQLAlchemy/concrete adapters.
 
 **Two truths & four distinct responsibilities:** SQLite is the *transactional accounting + processing-state store*; the **immutable source artifacts are the authoritative evidence** for downloaded documents. Keep these separate: **(a) source artifacts** — raw ZIP/extracted XML + hashes (evidence, immutable); **(b) `documents`** — one row per UUID = current identity/projection only (issuer/receiver/type/version/hashes), **not** a mutable status field; **(c) `metadata_snapshots`** — timestamped status *observations* (§6); **(d) `fiscal_events`** — the **single authoritative append-only history** from which current fiscal state is projected. A metadata observation that **materially changes fiscal state** (e.g. vigente→cancelado) **appends a `fiscal_event`**; a snapshot that changes nothing is recorded as an observation only. There is exactly one authoritative history (`fiscal_events`); `documents` and any cached state are projections, never the authority. *Append-only event history, not full event-sourcing/replay.*
 
@@ -124,7 +125,7 @@ DownloadCursor{ client_rfc, service, direction, query_start, query_end,
 ## 7. CLI — two flows (Download, then Process)
 The user pre-creates one `/data/<cliente>/` per client. Its **`identidad/`** subfolder holds the contributor's identity artifacts — `<RFC>.cer`, `<RFC>.key`, and `constancia_situacion_fiscal.pdf` (**CSF**). Downloaded CFDIs live under **`source/raw/`** (authoritative, immutable ZIPs + manifests) and **`source/extracted/<Tipo>/`** (derived, reproducible, classified XMLs — this *is* the "CFDIs" set; any UI label like `CFDIs/` refers to `source/extracted/`, never a separate authoritative copy). `.cer`/`.key` are **cryptographic identity** (SAT auth only); the **CSF is fiscal identity**; extracted CFDIs are **transactional data** — three distinct concerns (§7a). **Download** is separated because the SAT WS is the one unreliable external step. **Process requires an accounting period `YYYY-MM`** (don't let the agent invent period semantics) **and a resolved `ContributorProfile`** (§7a). Each flow is success/fail **per client**; the CLI only invokes use cases (all iteration/logic lives in `ExecuteDownloadUseCase`/`ExecuteProcessUseCase`).
 
-**§7a — Contributor identity (fiscal identity is first-class, owned by `fiscal/`).** Three concerns stay separate: **cryptographic identity** (`.cer/.key/password` → SAT auth, `infrastructure`), **fiscal identity** (CSF → `ContributorProfile`, `fiscal/`), **transactional data** (CFDIs). `fiscal/` answers *who is the taxpayer?*, `contabilidad/` *how to account?*, `ledger/` *what was recorded?*, `infrastructure/` *how to talk to SAT?*.
+**§7a — Contributor identity (fiscal identity is first-class, owned by `fiscal/`).** Three concerns stay separate: **cryptographic identity** (`.cer/.key/password` → SAT auth, `infrastructure`), **fiscal identity** (CSF → `ContributorProfile`, `fiscal/`), **transactional data** (CFDIs). `fiscal/` answers *who is the taxpayer?*, `contabilidad/` *how to account?*, `ledger` *what was recorded?*, `infrastructure/` *how to talk to SAT?*.
 
 `fiscal/` (with the contributor-identity domain models) owns the taxpayer-identity vocabulary — the concrete module layout is an implementation detail, not spec:
 ```
@@ -202,7 +203,7 @@ ContributorProfileRecord{ profile: ContributorProfile, csf_hash, csf_obtained_at
 - **`FiscalEvent.kind` for M3 — one kind: `document_status_changed`** (vigente↔cancelado from a `MetadataSnapshot`; substitution `motivo 01`+`TipoRelacion 04` is the *same* transition carried in `detail_json`, not a second kind). `effective_at` = the snapshot's status date (`FechaCancelacion` for a cancellation), **never `recorded_at`**. The event's `source_hash` = the **metadata-observation hash** (its provenance) — distinct from `posting_snapshot.source_hash` (extracted-XML).
 - **Discounts:** M3 default `discount_policy = net` (revenue/expense = `SubTotal − Descuento` directly; no contra roles).
 - **Payroll/withholding drafts (4.10/4.13 EMITIDO):** `NEEDS_REVIEW` with **zero lines** + reason — M3 parses no `nomina12`/retenciones-root; no payroll roles, no parser.
-- **MetadataSnapshot:** field set per §6a; `effective_at` = `cancellation_date`. Confirm the exact `DocumentStatus` catalog values against the SAT Solicitud doc before wiring the join.
+- **MetadataSnapshot:** field set per §6a; `effective_at` = `cancellation_date`. **Status comes from `satcfdi` as words** (`EstadoComprobante`: `'Vigente'`/`'Cancelado'`/`'Todos'`), not numeric codes — map at the adapter boundary to the domain enum (`'Vigente'→VIGENTE`, `'Cancelado'→CANCELLED`, anything else/absent→`UNKNOWN`; never crash, never guess, §5/§6). `satcfdi` status strings never cross into the domain.
 - **Mapping/config:** `ClaveProdServ → AccountingCategory → AccountRole → Account` is a **versioned YAML** (its version = `mapping_version`) behind a `MappingProvider` port; rules stay role-typed and never see account numbers. The agent proposes the YAML shape for approval.
 - **`ASSUMED_PUE → SUPPORTED_BY_BANK` promotion: out of M3** (needs bank data; a future reconciliation milestone).
 - **`FiscalDocument.fecha`** (CFDI `Fecha`) is added to the fiscal model (needed for journal dating and 4.15's cancellation-period logic).
