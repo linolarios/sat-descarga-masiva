@@ -2,16 +2,40 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
+from types import MappingProxyType
+from typing import Final
 
 from sat_descarga_masiva.domain.model.value_objects import Rfc
 
 
 class PersonaTipo(StrEnum):
+    """The persona type §7a resolves for a contributor.
+
+    `FISICA`/`MORAL` are what the constancia states. The two generic members are
+    not CSF facts: they are the identity §7a names for the two generic RFCs, so
+    they are only ever produced by the resolution step below (§7a), never read
+    off a constancia and never inferred from an RFC's shape or length.
+    """
+
     FISICA = "fisica"
     MORAL = "moral"
+    GENERICO_NACIONAL = "generico_nacional"
+    EXTRANJERO = "extranjero"
+
+
+#: The two RFCs whose identity the constancia cannot answer (§7a). A closed,
+#: explicit exception list — a mapping, not a rule: no other RFC's `PersonaTipo`
+#: is derived from its length or pattern.
+GENERIC_RFC_PERSONA: Final[Mapping[str, PersonaTipo]] = MappingProxyType(
+    {
+        "XAXX010101000": PersonaTipo.GENERICO_NACIONAL,
+        "XEXX010101000": PersonaTipo.EXTRANJERO,
+    }
+)
 
 
 class SituacionFiscal(StrEnum):
@@ -33,6 +57,20 @@ class RegimenFiscal:
 
 
 @dataclass(frozen=True)
+class ObligacionFiscal:
+    """One fiscal obligation exactly as the constancia states it (§7a).
+
+    Opaque on purpose: `code` and `description` are carried verbatim, and nothing
+    here knows what any code means. Recognition — which obligation feeds which
+    downstream rule — belongs to the consumer that needs it, never to this value,
+    so there is no catalog, no classification and no rewriting (D2).
+    """
+
+    code: str
+    description: str
+
+
+@dataclass(frozen=True)
 class ContributorProfile:
     """Normalized contributor identity resolved from the CSF + FIEL cert."""
 
@@ -42,6 +80,8 @@ class ContributorProfile:
     regimen_fiscal: RegimenFiscal
     situacion_fiscal: SituacionFiscal
     fecha_inicio_operaciones: date | None = None
+    obligaciones: tuple[ObligacionFiscal, ...] = ()
+    codigo_postal: str | None = None
 
 
 @dataclass(frozen=True)

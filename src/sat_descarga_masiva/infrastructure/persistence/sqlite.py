@@ -33,6 +33,7 @@ from sat_descarga_masiva.domain.errors import (
 from sat_descarga_masiva.domain.model.contributor import (
     ContributorProfile,
     ContributorProfileRecord,
+    ObligacionFiscal,
     PersonaTipo,
     RegimenFiscal,
     SituacionFiscal,
@@ -58,12 +59,14 @@ from sat_descarga_masiva.domain.model.review import (
 from sat_descarga_masiva.domain.model.source import SourceIdentity
 from sat_descarga_masiva.domain.model.value_objects import RequestId, Rfc, Uuid
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 """SQLite schema version written to ``PRAGMA user_version`` by ``init_schema``.
 
 1 = M1 ledger tables (download_jobs, download_cursors, source_records)
 2 = M2 tables (documents, fiscal_events, contributor_profiles, csf_artifacts,
     review_flags, pipeline_runs) + download_jobs.pipeline_run_id
+3 = M2-E identity completeness (profile_obligaciones) + a nullable
+    contributor_profiles.codigo_postal
 """
 
 _CREATE_DOWNLOAD_JOBS = """
@@ -183,10 +186,27 @@ CREATE TABLE IF NOT EXISTS contributor_profiles (
     regimen_fiscal_description TEXT NOT NULL,
     situacion_fiscal TEXT NOT NULL,
     fecha_inicio_operaciones TEXT,
+    codigo_postal TEXT,
     csf_hash TEXT NOT NULL,
     csf_obtained_at TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
     PRIMARY KEY (client_rfc, profile_version)
+)
+"""
+
+#: The obligation list is a child table of a profile version, not a JSON/TEXT blob:
+#: §7a's profile is versioned and immutable, so its items must be readable as rows and
+#: must keep their source order — `ordinal` is that order, and (client_rfc,
+#: profile_version, ordinal) is the key. The parent link is a recorded key verified by
+#: the test suite; SQLite foreign keys are not enforced anywhere in this repository.
+_CREATE_PROFILE_OBLIGACIONES = """
+CREATE TABLE IF NOT EXISTS profile_obligaciones (
+    client_rfc TEXT NOT NULL,
+    profile_version INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    description TEXT NOT NULL,
+    PRIMARY KEY (client_rfc, profile_version, ordinal)
 )
 """
 
@@ -236,6 +256,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         _CREATE_REVIEW_FLAGS,
         _CREATE_PIPELINE_RUNS,
     ),
+    3: (_CREATE_PROFILE_OBLIGACIONES,),
 }
 
 _DOCUMENT_COLUMNS = """
@@ -271,12 +292,12 @@ SELECT {_EVENT_COLUMNS} FROM fiscal_events WHERE uuid = ? ORDER BY event_id
 _PROFILE_COLUMNS = """
     client_rfc, profile_version, nombre, persona_tipo, regimen_fiscal_code,
     regimen_fiscal_description, situacion_fiscal, fecha_inicio_operaciones,
-    csf_hash, csf_obtained_at, recorded_at
+    codigo_postal, csf_hash, csf_obtained_at, recorded_at
 """
 
 _INSERT_PROFILE = f"""
 INSERT INTO contributor_profiles ({_PROFILE_COLUMNS})
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _SELECT_PROFILE = f"""
@@ -287,6 +308,16 @@ WHERE client_rfc = ? AND profile_version = ?
 _SELECT_LATEST_PROFILE = f"""
 SELECT {_PROFILE_COLUMNS} FROM contributor_profiles
 WHERE client_rfc = ? ORDER BY profile_version DESC LIMIT 1
+"""
+
+_INSERT_OBLIGACION = """
+INSERT INTO profile_obligaciones (client_rfc, profile_version, ordinal, code, description)
+VALUES (?, ?, ?, ?, ?)
+"""
+
+_SELECT_OBLIGACIONES = """
+SELECT code, description FROM profile_obligaciones
+WHERE client_rfc = ? AND profile_version = ? ORDER BY ordinal
 """
 
 _INSERT_CSF_ARTIFACT = """
@@ -396,6 +427,19 @@ def _ensure_run_link(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE download_jobs ADD COLUMN pipeline_run_id TEXT")
 
 
+def _ensure_profile_postal_code(conn: sqlite3.Connection) -> None:
+    """Add `contributor_profiles.codigo_postal` to a schema-2 database (M2-E).
+
+    The v3 step is the child table; the postal code is a new column on a table that
+    already exists, so it is added by the same guarded, additive ALTER shape M2 used
+    for the run link. Existing rows read as ``NULL``, which is exactly "the constancia
+    did not state a postal code" — nothing is backfilled or invented.
+    """
+    columns = _columns(conn, "contributor_profiles")
+    if columns and "codigo_postal" not in columns:
+        conn.execute("ALTER TABLE contributor_profiles ADD COLUMN codigo_postal TEXT")
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """Create/migrate the SQLite schema up to :data:`SCHEMA_VERSION` (§11 M2).
 
@@ -411,6 +455,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
         for statement in _MIGRATIONS[step]:
             conn.execute(statement)
     _ensure_run_link(conn)
+    _ensure_profile_postal_code(conn)
     if version < SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
@@ -584,7 +629,16 @@ def _event_from_row(row: sqlite3.Row) -> FiscalEvent:
     )
 
 
-def _profile_from_row(row: sqlite3.Row) -> ContributorProfileRecord:
+def _profile_from_row(
+    row: sqlite3.Row, obligaciones: tuple[ObligacionFiscal, ...] = ()
+) -> ContributorProfileRecord:
+    """Rebuild a profile version from its own columns plus its obligation rows.
+
+    `obligaciones` is passed in rather than read here, so this stays a pure row mapper:
+    the child rows are keyed by the same ``(client_rfc, profile_version)`` the caller
+    already has in hand. Nothing defaults an absent postal code to a value — ``NULL``
+    (the v2 shape, and any constancia that states none) reads back as ``None``.
+    """
     raw_date: str | None = row["fecha_inicio_operaciones"]
     return ContributorProfileRecord(
         profile=ContributorProfile(
@@ -597,6 +651,8 @@ def _profile_from_row(row: sqlite3.Row) -> ContributorProfileRecord:
             ),
             situacion_fiscal=SituacionFiscal(row["situacion_fiscal"]),
             fecha_inicio_operaciones=date.fromisoformat(raw_date) if raw_date else None,
+            obligaciones=obligaciones,
+            codigo_postal=row["codigo_postal"],
         ),
         csf_hash=row["csf_hash"],
         csf_obtained_at=_from_iso(row["csf_obtained_at"]),
@@ -777,12 +833,22 @@ class SqliteContributorProfileRepository:
     ``(client_rfc, profile_version)`` is the primary key: an existing version is
     never updated in place — identical content is a no-op, different content is an
     ``ImmutableRecordConflict`` (a correction is a new version).
+
+    A profile version is written as one unit: the parent row plus one
+    `profile_obligaciones` row per obligation. Nothing may land without the other, so a
+    failure while writing the obligations rolls the parent row back too. That rollback
+    only happens when this repository owns the transaction (``commit=True``, the
+    default): M2.8 wires stores with ``commit=False`` inside ``SqliteUnitOfWork``, where
+    the unit owns COMMIT *and* ROLLBACK — rolling back there would end the unit's
+    transaction behind its back and break its all-or-nothing guarantee.
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, *, commit: bool = True) -> None:
         conn.row_factory = sqlite3.Row
         self._conn = conn
+        self._commit_writes = commit
         self._conn.execute(_CREATE_CONTRIBUTOR_PROFILES)
+        self._conn.execute(_CREATE_PROFILE_OBLIGACIONES)
 
     def save(self, record: ContributorProfileRecord) -> None:
         incoming = replace(
@@ -794,38 +860,71 @@ class SqliteContributorProfileRepository:
             _SELECT_PROFILE, (incoming.profile.rfc.value, incoming.profile_version)
         ).fetchone()
         if existing is not None:
-            if _profile_from_row(existing) != incoming:
+            if self._record_from_row(existing) != incoming:
                 raise ImmutableRecordConflict(
                     f"profile {incoming.profile.rfc.value} version "
                     f"{incoming.profile_version} already recorded with different content"
                 )
             return  # identical re-save: idempotent no-op
         start = incoming.profile.fecha_inicio_operaciones
-        self._conn.execute(
-            _INSERT_PROFILE,
-            (
-                incoming.profile.rfc.value,
-                incoming.profile_version,
-                incoming.profile.nombre,
-                incoming.profile.persona_tipo.value,
-                incoming.profile.regimen_fiscal.code,
-                incoming.profile.regimen_fiscal.description,
-                incoming.profile.situacion_fiscal.value,
-                start.isoformat() if start is not None else None,
-                incoming.csf_hash,
-                _iso(incoming.csf_obtained_at),
-                _iso(incoming.recorded_at),
-            ),
-        )
-        self._conn.commit()
+        try:
+            self._conn.execute(
+                _INSERT_PROFILE,
+                (
+                    incoming.profile.rfc.value,
+                    incoming.profile_version,
+                    incoming.profile.nombre,
+                    incoming.profile.persona_tipo.value,
+                    incoming.profile.regimen_fiscal.code,
+                    incoming.profile.regimen_fiscal.description,
+                    incoming.profile.situacion_fiscal.value,
+                    start.isoformat() if start is not None else None,
+                    incoming.profile.codigo_postal,
+                    incoming.csf_hash,
+                    _iso(incoming.csf_obtained_at),
+                    _iso(incoming.recorded_at),
+                ),
+            )
+            self._conn.executemany(
+                _INSERT_OBLIGACION,
+                [
+                    (
+                        incoming.profile.rfc.value,
+                        incoming.profile_version,
+                        ordinal,
+                        obligacion.code,
+                        obligacion.description,
+                    )
+                    for ordinal, obligacion in enumerate(incoming.profile.obligaciones)
+                ],
+            )
+        except BaseException:
+            if self._commit_writes:
+                self._conn.rollback()
+            raise
+        self._commit_write()
 
     def get(self, client_rfc: Rfc, profile_version: int) -> ContributorProfileRecord | None:
         row = self._conn.execute(_SELECT_PROFILE, (client_rfc.value, profile_version)).fetchone()
-        return None if row is None else _profile_from_row(row)
+        return None if row is None else self._record_from_row(row)
 
     def latest(self, client_rfc: Rfc) -> ContributorProfileRecord | None:
         row = self._conn.execute(_SELECT_LATEST_PROFILE, (client_rfc.value,)).fetchone()
-        return None if row is None else _profile_from_row(row)
+        return None if row is None else self._record_from_row(row)
+
+    def _record_from_row(self, row: sqlite3.Row) -> ContributorProfileRecord:
+        return _profile_from_row(
+            row,
+            self._obligaciones(row["client_rfc"], row["profile_version"]),
+        )
+
+    def _obligaciones(self, client_rfc: str, profile_version: int) -> tuple[ObligacionFiscal, ...]:
+        rows = self._conn.execute(_SELECT_OBLIGACIONES, (client_rfc, profile_version)).fetchall()
+        return tuple(ObligacionFiscal(row["code"], row["description"]) for row in rows)
+
+    def _commit_write(self) -> None:
+        if self._commit_writes:
+            self._conn.commit()
 
 
 class SqliteCsfArtifactRepository:

@@ -37,6 +37,7 @@ from sat_descarga_masiva.domain.errors import (
 from sat_descarga_masiva.domain.model.contributor import (
     ContributorProfile,
     ContributorProfileRecord,
+    ObligacionFiscal,
     PersonaTipo,
     RegimenFiscal,
     SituacionFiscal,
@@ -176,7 +177,13 @@ def _event(**overrides: object) -> FiscalEvent:
     return FiscalEvent(**base)  # type: ignore[arg-type]
 
 
-def _profile(profile_version: int = 1, nombre: str = "ACME SA DE CV") -> ContributorProfileRecord:
+def _profile(
+    profile_version: int = 1,
+    nombre: str = "ACME SA DE CV",
+    *,
+    obligaciones: tuple[ObligacionFiscal, ...] = (),
+    codigo_postal: str | None = None,
+) -> ContributorProfileRecord:
     return ContributorProfileRecord(
         profile=ContributorProfile(
             rfc=RFC,
@@ -184,6 +191,8 @@ def _profile(profile_version: int = 1, nombre: str = "ACME SA DE CV") -> Contrib
             persona_tipo=PersonaTipo.MORAL,
             regimen_fiscal=RegimenFiscal(code="601", description="General de Ley Personas Morales"),
             situacion_fiscal=SituacionFiscal.ACTIVO,
+            obligaciones=obligaciones,
+            codigo_postal=codigo_postal,
         ),
         csf_hash=HASH_B,
         csf_obtained_at=T0,
@@ -425,6 +434,82 @@ def test_profile_regimen_and_situacion_round_trip(stores: Stores) -> None:
     assert stored.profile.persona_tipo is PersonaTipo.MORAL
     assert stored.profile.situacion_fiscal is SituacionFiscal.ACTIVO
     assert stored.profile.regimen_fiscal.code == "601"
+
+
+# --- contributor_profiles: the optional CSF facts (§7a, M2-E) -----------------
+#
+# `obligaciones` and `codigo_postal` are facts of the *constancia*, so they belong
+# to the versioned profile: they are part of what makes a version immutable, they
+# round-trip verbatim (order and punctuation included) and they come back whole
+# from `latest()` — reconstruction is part of the contract, not an extra.
+
+_OBLIGACIONES = (
+    ObligacionFiscal("3", "Declarar anualmente el ISR"),
+    ObligacionFiscal("33", "Declarar mensualmente el ISR por actividades empresariales"),
+    ObligacionFiscal("9", "Declarar mensualmente el IVA."),
+)
+
+
+def test_profile_carries_the_obligations_and_postal_code_verbatim(stores: Stores) -> None:
+    stores.profiles.save(_profile(1, obligaciones=_OBLIGACIONES, codigo_postal="97000"))
+    stored = stores.profiles.get(RFC, 1)
+    assert stored is not None
+    assert stored.profile.obligaciones == _OBLIGACIONES
+    assert stored.profile.codigo_postal == "97000"
+
+
+def test_profile_latest_reconstructs_the_obligations(stores: Stores) -> None:
+    """The highest version comes back whole, and an earlier version is left alone."""
+    stores.profiles.save(_profile(1))
+    stores.profiles.save(_profile(2, obligaciones=_OBLIGACIONES, codigo_postal="97000"))
+    latest = stores.profiles.latest(RFC)
+    assert latest is not None
+    assert latest.profile.obligaciones == _OBLIGACIONES
+    assert latest.profile.codigo_postal == "97000"
+    kept = stores.profiles.get(RFC, 1)
+    assert kept is not None
+    assert kept.profile.obligaciones == ()
+    assert kept.profile.codigo_postal is None
+
+
+def test_profile_without_the_optional_facts_reports_absence(stores: Stores) -> None:
+    """Absent stays absent through storage: `()` and None, never a filled-in default."""
+    stores.profiles.save(_profile(1))
+    stored = stores.profiles.get(RFC, 1)
+    assert stored is not None
+    assert stored.profile.obligaciones == ()
+    assert stored.profile.codigo_postal is None
+
+
+def test_profile_obligations_keep_their_order_and_are_never_normalised(stores: Stores) -> None:
+    """A reordered or repeated list is a different fact, not the same one tidied up."""
+    once = (
+        ObligacionFiscal("9", "Declarar mensualmente el IVA."),
+        ObligacionFiscal("3", "Declarar anualmente el ISR"),
+    )
+    stores.profiles.save(_profile(1, obligaciones=once))
+    stored = stores.profiles.get(RFC, 1)
+    assert stored is not None
+    assert stored.profile.obligaciones == once
+    with pytest.raises(ImmutableRecordConflict):
+        stores.profiles.save(_profile(1, obligaciones=tuple(reversed(once))))
+
+
+def test_profile_immutability_covers_the_optional_facts(stores: Stores) -> None:
+    """A version is immutable as a whole — the new facts cannot be edited in place either."""
+    stores.profiles.save(_profile(1))
+    with pytest.raises(ImmutableRecordConflict):
+        stores.profiles.save(_profile(1, obligaciones=_OBLIGACIONES))
+    with pytest.raises(ImmutableRecordConflict):
+        stores.profiles.save(_profile(1, codigo_postal="97000"))
+    assert stores.profiles.get(RFC, 1) == _profile(1)
+
+
+def test_profile_resave_with_identical_optional_facts_is_idempotent(stores: Stores) -> None:
+    version = _profile(1, obligaciones=_OBLIGACIONES, codigo_postal="97000")
+    stores.profiles.save(version)
+    stores.profiles.save(version)
+    assert stores.profiles.get(RFC, 1) == version
 
 
 # --- csf_artifacts: immutable, hash-named source artifact (§7a) ---------------

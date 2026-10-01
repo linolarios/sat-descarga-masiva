@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from sat_descarga_masiva.domain.model.contributor import (
+    ObligacionFiscal,
     PersonaTipo,
     RegimenFiscal,
     SituacionFiscal,
@@ -30,7 +31,12 @@ class CsfArtifact:
 
 @dataclass(frozen=True)
 class CsfData:
-    """Normalized fiscal data extracted from constancia_situacion_fiscal.pdf."""
+    """Normalized fiscal data extracted from constancia_situacion_fiscal.pdf.
+
+    `obligaciones` is empty when the constancia carries no obligation list and
+    `codigo_postal` is None when it carries no postal code: both are optional
+    facts, and an absent fact is reported as absent rather than guessed (D3/D6).
+    """
 
     rfc: Rfc
     nombre: str
@@ -38,3 +44,5 @@ class CsfData:
     regimen_fiscal: RegimenFiscal
     situacion_fiscal: SituacionFiscal
     fecha_inicio_operaciones: date | None = None
+    obligaciones: tuple[ObligacionFiscal, ...] = ()
+    codigo_postal: str | None = None

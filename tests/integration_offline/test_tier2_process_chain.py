@@ -39,6 +39,8 @@ from sat_descarga_masiva.application.use_cases.process_documents import ProcessD
 from sat_descarga_masiva.domain.errors import CsfParseError
 from sat_descarga_masiva.domain.model.contributor import (
     ContributorProfileRecord,
+    ObligacionFiscal,
+    PersonaTipo,
     RegimenFiscal,
 )
 from sat_descarga_masiva.domain.model.csf import CsfArtifact
@@ -79,6 +81,8 @@ from sat_descarga_masiva.infrastructure.source.extracted_reader import (
 CSF_RFC = Rfc("WATM640917J45")
 #: A different RFC, for the mismatched-identity leg.
 OTHER_RFC = Rfc("AAA010101AAA")
+#: §7a's generic national identity, for the generic-RFC leg (M2-E).
+GENERIC_NACIONAL_RFC = Rfc("XAXX010101000")
 #: The TFD UUID the committed `cfdi_tfd_4_0.xml` fixture carries.
 TFD_UUID = "123E4567-E89B-12D3-A456-426614174000"
 PACKAGE_ID = PackageId("4e80345d-917f-40bb-a98f-4a73939353c5_01")
@@ -261,6 +265,84 @@ def test_onboarding_retains_the_constancia_and_persists_profile_version_one(
     assert profile.profile.regimen_fiscal.code == "612"
     assert chain.count("contributor_profiles") == 1
     assert chain.count("csf_artifacts") == 1
+
+
+# --- leg A'': the M2-E identity facts through the real chain (§7a) ----------------
+
+
+def test_the_golden_constancia_carries_its_obligations_into_the_stored_profile(
+    tmp_path: Path,
+) -> None:
+    """M2-E on the committed evidence: real PDF -> real parser -> real sqlite row."""
+    chain = _chain(tmp_path)
+    chain.onboard()
+
+    profile = chain.profile()
+    assert profile is not None
+    assert profile.profile.obligaciones == (
+        ObligacionFiscal("3", "Declarar anualmente el ISR"),
+        ObligacionFiscal("33", "Declarar mensualmente el ISR por actividades empresariales"),
+        ObligacionFiscal("9", "Declarar mensualmente el IVA."),
+    )
+    assert profile.profile.codigo_postal is None  # the fixture states none
+    assert chain.count("profile_obligaciones") == 3
+
+
+def test_a_constancia_with_a_postal_code_and_obligations_reaches_the_stores(
+    tmp_path: Path,
+) -> None:
+    """The facts are written as rows: the order is the source order, and a peer re-reads them."""
+    chain = _chain(tmp_path)
+    constancia = build_constancia_bytes(
+        "Régimen Fiscal: 612 - Personas físicas con actividades empresariales",
+        codigo_postal_lines=("Código Postal: 97000",),
+        obligaciones_lines=(
+            "Obligaciones: 3 Declarar anualmente el ISR; 9 Declarar mensualmente el IVA.",
+        ),
+    )
+
+    outcome = chain.onboard(csf_bytes=constancia)
+
+    assert outcome.onboarded is True
+    profile = chain.profile()
+    assert profile is not None
+    assert profile.profile.codigo_postal == "97000"
+    assert profile.profile.obligaciones == (
+        ObligacionFiscal("3", "Declarar anualmente el ISR"),
+        ObligacionFiscal("9", "Declarar mensualmente el IVA."),
+    )
+    rows = chain.conn.execute(
+        "SELECT ordinal, code, description FROM profile_obligaciones ORDER BY ordinal"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        (0, "3", "Declarar anualmente el ISR"),
+        (1, "9", "Declarar mensualmente el IVA."),
+    ]
+    other = sqlite3.connect(chain.db_path)  # the row reconstructs from its own child rows
+    assert SqliteContributorProfileRepository(other).latest(CSF_RFC) == profile
+
+
+def test_a_generic_rfc_keeps_the_generic_identity_the_constancia_cannot_state(
+    tmp_path: Path,
+) -> None:
+    """D8 at the real seams: the constancia says Física, the resolved profile does not."""
+    chain = _chain(tmp_path)
+    constancia = build_constancia_bytes(
+        "Régimen Fiscal: 612 - Personas físicas con actividades empresariales",
+        rfc=GENERIC_NACIONAL_RFC.value,
+    )
+    assert PdfCsfParser().parse(constancia).persona_tipo is PersonaTipo.FISICA
+
+    outcome = chain.onboard(
+        configured=GENERIC_NACIONAL_RFC, cert=GENERIC_NACIONAL_RFC, csf_bytes=constancia
+    )
+
+    assert outcome.onboarded is True
+    assert outcome.profile_record is not None
+    assert outcome.profile_record.profile.persona_tipo is PersonaTipo.GENERICO_NACIONAL
+    stored = chain.profile(GENERIC_NACIONAL_RFC)
+    assert stored is not None
+    assert stored.profile.persona_tipo is PersonaTipo.GENERICO_NACIONAL
 
 
 def test_re_onboarding_the_identical_constancia_writes_no_new_version(tmp_path: Path) -> None:

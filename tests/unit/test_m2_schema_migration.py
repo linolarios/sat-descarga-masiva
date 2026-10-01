@@ -10,12 +10,21 @@ import sqlite3
 from datetime import UTC, datetime
 
 from sat_descarga_masiva.domain.enums.catalog import Direction, ServiceType
+from sat_descarga_masiva.domain.model.contributor import (
+    ContributorProfile,
+    ContributorProfileRecord,
+    ObligacionFiscal,
+    PersonaTipo,
+    RegimenFiscal,
+    SituacionFiscal,
+)
 from sat_descarga_masiva.domain.model.ledger import DownloadJob, JobStatus
 from sat_descarga_masiva.domain.model.pipeline_run import PipelineFlow, PipelineRun
 from sat_descarga_masiva.domain.model.source import SourceIdentity, sha256_hex
 from sat_descarga_masiva.domain.model.value_objects import RequestId, Rfc
 from sat_descarga_masiva.infrastructure.persistence.sqlite import (
     SCHEMA_VERSION,
+    SqliteContributorProfileRepository,
     SqliteDownloadJobRepository,
     SqlitePipelineRunRepository,
     SqliteSourceIdentityIndex,
@@ -27,6 +36,7 @@ RID = RequestId("4e80345d-917f-40bb-a98f-4a73939353c5")
 UID = "4e80345d-917f-40bb-a98f-4a73939353c5"
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 T1 = datetime(2026, 1, 31, tzinfo=UTC)
+HASH = "a" * 64
 
 M1_TABLES = {"download_jobs", "download_cursors", "source_records"}
 M2_TABLES = {
@@ -37,6 +47,8 @@ M2_TABLES = {
     "review_flags",
     "pipeline_runs",
 }
+#: Schema 3 (M2-E) adds the obligation child table and the optional postal code.
+M2E_TABLES = {"profile_obligaciones"}
 
 _PRE_M2_DOWNLOAD_JOBS = """
 CREATE TABLE download_jobs (
@@ -121,6 +133,7 @@ def test_init_schema_creates_all_m1_and_m2_tables() -> None:
     names = _table_names(conn)
     assert names >= M1_TABLES
     assert names >= M2_TABLES
+    assert names >= M2E_TABLES
 
 
 def test_init_schema_is_idempotent() -> None:
@@ -235,3 +248,139 @@ def test_correlation_chain_pipeline_run_to_download_job_to_source_identity() -> 
     # authoritative evidence (§4); `source_records` only maps uuid -> sha256.
     assert _columns(conn, "source_records") == {"uuid", "sha256"}
     assert _columns(conn, "download_jobs").isdisjoint({"uuid", "sha256"})
+
+
+# --- M2-E: the v3 step adds the obligation child table + a nullable postal code ----
+
+
+#: `contributor_profiles` exactly as schema 2 left it: the profile row's own columns.
+_PRE_M2E_CONTRIBUTOR_PROFILES = """
+CREATE TABLE contributor_profiles (
+    client_rfc TEXT NOT NULL,
+    profile_version INTEGER NOT NULL,
+    nombre TEXT NOT NULL,
+    persona_tipo TEXT NOT NULL,
+    regimen_fiscal_code TEXT NOT NULL,
+    regimen_fiscal_description TEXT NOT NULL,
+    situacion_fiscal TEXT NOT NULL,
+    fecha_inicio_operaciones TEXT,
+    csf_hash TEXT NOT NULL,
+    csf_obtained_at TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (client_rfc, profile_version)
+)
+"""
+
+_PRE_M2E_PROFILE_ROW = """
+INSERT INTO contributor_profiles (
+    client_rfc, profile_version, nombre, persona_tipo, regimen_fiscal_code,
+    regimen_fiscal_description, situacion_fiscal, fecha_inicio_operaciones,
+    csf_hash, csf_obtained_at, recorded_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def _record(
+    profile_version: int = 1,
+    *,
+    obligaciones: tuple[ObligacionFiscal, ...] = (),
+    codigo_postal: str | None = None,
+) -> ContributorProfileRecord:
+    return ContributorProfileRecord(
+        profile=ContributorProfile(
+            rfc=RFC,
+            nombre="ACME SA DE CV",
+            persona_tipo=PersonaTipo.MORAL,
+            regimen_fiscal=RegimenFiscal("601", "General de Ley Personas Morales"),
+            situacion_fiscal=SituacionFiscal.ACTIVO,
+            obligaciones=obligaciones,
+            codigo_postal=codigo_postal,
+        ),
+        csf_hash=HASH,
+        csf_obtained_at=T0,
+        profile_version=profile_version,
+        recorded_at=T1,
+    )
+
+
+def _v2_database() -> sqlite3.Connection:
+    """A database as M2 (schema 2) left it: one profile row, no obligations, no postal code."""
+    conn = _conn()
+    conn.execute(_PRE_M2E_CONTRIBUTOR_PROFILES)
+    conn.execute(
+        _PRE_M2E_PROFILE_ROW,
+        (
+            RFC.value,
+            1,
+            "ACME SA DE CV",
+            PersonaTipo.MORAL.value,
+            "601",
+            "General de Ley Personas Morales",
+            SituacionFiscal.ACTIVO.value,
+            None,
+            HASH,
+            T0.isoformat(),
+            T1.isoformat(),
+        ),
+    )
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    return conn
+
+
+def test_a_v2_database_upgrades_to_v3_and_keeps_its_profile_rows() -> None:
+    """The ladder only adds: a v2 profile row survives, its new facts reading as absent."""
+    conn = _v2_database()
+    assert _user_version(conn) == 2
+    assert "codigo_postal" not in _columns(conn, "contributor_profiles")
+    assert "profile_obligaciones" not in _table_names(conn)
+
+    init_schema(conn)
+
+    assert _user_version(conn) == SCHEMA_VERSION == 3
+    assert "codigo_postal" in _columns(conn, "contributor_profiles")
+    assert _table_names(conn) >= M2E_TABLES
+    stored = SqliteContributorProfileRepository(conn).latest(RFC)
+    assert stored is not None
+    assert stored == _record(1)  # the v2 row intact, with nothing invented for the new facts
+
+    init_schema(conn)  # idempotent on an already-migrated v3 database
+    assert SqliteContributorProfileRepository(conn).latest(RFC) == _record(1)
+
+
+def test_an_upgraded_database_accepts_a_new_version_with_the_new_facts() -> None:
+    """The migration must leave the store usable, not just structurally correct."""
+    conn = _v2_database()
+    init_schema(conn)
+    profiles = SqliteContributorProfileRepository(conn)
+    obligaciones = (
+        ObligacionFiscal("3", "Declarar anualmente el ISR"),
+        ObligacionFiscal("9", "Declarar mensualmente el IVA."),
+    )
+
+    profiles.save(_record(2, obligaciones=obligaciones, codigo_postal="97000"))
+
+    latest = profiles.latest(RFC)
+    assert latest is not None
+    assert latest.profile_version == 2
+    assert latest.profile.obligaciones == obligaciones
+    assert latest.profile.codigo_postal == "97000"
+    assert profiles.get(RFC, 1) == _record(1)  # version 1 is untouched
+
+
+def test_the_profile_obligation_link_is_recorded_and_verified_not_db_enforced() -> None:
+    """SQLite foreign keys are off repo-wide (no `foreign_keys` pragma is ever turned on),
+    so the parent/child link is a recorded key that this suite verifies behaviourally —
+    never a constraint the database enforces."""
+    conn = _conn()
+    init_schema(conn)
+
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+    assert conn.execute("PRAGMA foreign_key_list(profile_obligaciones)").fetchall() == []
+    assert _columns(conn, "profile_obligaciones") == {
+        "client_rfc",
+        "profile_version",
+        "ordinal",
+        "code",
+        "description",
+    }

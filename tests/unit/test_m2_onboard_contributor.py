@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -40,6 +40,7 @@ from sat_descarga_masiva.domain.errors import CsfParseError, ImmutableRecordConf
 from sat_descarga_masiva.domain.model.contributor import (
     ContributorProfile,
     ContributorProfileRecord,
+    ObligacionFiscal,
     PersonaTipo,
     RegimenFiscal,
     SituacionFiscal,
@@ -57,17 +58,24 @@ from sat_descarga_masiva.infrastructure.source.csf_sink import FilesystemCsfArti
 
 RFC = Rfc("WATM640917J45")
 OTHER_RFC = Rfc("AAA010101AAA")
+GENERIC_NACIONAL_RFC = Rfc("XAXX010101000")
+GENERIC_EXTRANJERO_RFC = Rfc("XEXX010101000")
 CSF_PDF = b"%PDF-1.4 constancia de situacion fiscal"
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 T1 = datetime(2026, 1, 2, tzinfo=UTC)
 CSF_HASH = sha256_hex(CSF_PDF)
 
 
-def _csf(rfc: Rfc = RFC, *, nombre: str = "PERSONA FISICA DE PRUEBA") -> CsfData:
+def _csf(
+    rfc: Rfc = RFC,
+    *,
+    nombre: str = "PERSONA FISICA DE PRUEBA",
+    persona_tipo: PersonaTipo = PersonaTipo.FISICA,
+) -> CsfData:
     return CsfData(
         rfc=rfc,
         nombre=nombre,
-        persona_tipo=PersonaTipo.FISICA,
+        persona_tipo=persona_tipo,
         regimen_fiscal=RegimenFiscal("612", "Personas fisicas con actividades empresariales"),
         situacion_fiscal=SituacionFiscal.ACTIVO,
     )
@@ -506,3 +514,165 @@ def test_the_real_stores_accept_the_versioning_and_keep_every_version(
     assert profiles.latest(RFC) == second.profile_record
     assert artifacts.get(CSF_HASH) == first.csf_artifact
     assert (tmp_path / "csf" / f"{CSF_HASH}.pdf").read_bytes() == CSF_PDF
+
+
+@pytest.mark.parametrize(
+    ("rfc", "expected"),
+    (
+        (GENERIC_NACIONAL_RFC, PersonaTipo.GENERICO_NACIONAL),
+        (GENERIC_EXTRANJERO_RFC, PersonaTipo.EXTRANJERO),
+    ),
+)
+def test_a_generic_rfc_resolves_to_its_generic_persona_tipo(
+    rfc: Rfc, expected: PersonaTipo
+) -> None:
+    """§7a: two RFCs *are* the generic identities, whatever the constancia's persona says."""
+    resolved = resolve_contributor_profile(
+        configured_rfc=rfc, cert_rfc=rfc, csf=_csf(rfc, persona_tipo=PersonaTipo.FISICA)
+    )
+    assert resolved.profile.persona_tipo is expected
+
+
+def test_the_parsed_persona_is_not_rewritten_by_the_generic_rule() -> None:
+    """D8: the override lives at resolution, so the parsed CSF fact stays as parsed."""
+    csf = _csf(GENERIC_NACIONAL_RFC, persona_tipo=PersonaTipo.FISICA)
+    resolved = resolve_contributor_profile(
+        configured_rfc=GENERIC_NACIONAL_RFC, cert_rfc=GENERIC_NACIONAL_RFC, csf=csf
+    )
+    assert csf.persona_tipo is PersonaTipo.FISICA
+    assert resolved.profile.persona_tipo is PersonaTipo.GENERICO_NACIONAL
+
+
+@pytest.mark.parametrize("persona_tipo", (PersonaTipo.FISICA, PersonaTipo.MORAL))
+def test_the_csf_persona_is_authoritative_for_every_other_rfc(persona_tipo: PersonaTipo) -> None:
+    resolved = resolve_contributor_profile(
+        configured_rfc=RFC, cert_rfc=RFC, csf=_csf(persona_tipo=persona_tipo)
+    )
+    assert resolved.profile.persona_tipo is persona_tipo
+
+
+def test_a_thirteen_character_rfc_does_not_imply_a_persona_tipo() -> None:
+    """D7: RFC length is not a persona type. `RFC` is 13 characters and the CSF says Moral."""
+    assert len(RFC.value) == 13
+    resolved = resolve_contributor_profile(
+        configured_rfc=RFC, cert_rfc=RFC, csf=_csf(persona_tipo=PersonaTipo.MORAL)
+    )
+    assert resolved.profile.persona_tipo is PersonaTipo.MORAL
+
+
+def test_the_resolver_carries_the_obligations_and_postal_code_unchanged() -> None:
+    """The new facts travel from the CSF to the profile verbatim (no re-derivation)."""
+    obligaciones = (
+        ObligacionFiscal("3", "Declarar anualmente el ISR"),
+        ObligacionFiscal("9", "Declarar mensualmente el IVA."),
+    )
+    csf = replace(_csf(), obligaciones=obligaciones, codigo_postal="97000")
+    resolved = resolve_contributor_profile(configured_rfc=RFC, cert_rfc=RFC, csf=csf)
+    assert resolved.profile.obligaciones == obligaciones
+    assert resolved.profile.codigo_postal == "97000"
+
+
+def test_the_resolver_invents_nothing_when_the_csf_is_silent() -> None:
+    resolved = resolve_contributor_profile(configured_rfc=RFC, cert_rfc=RFC, csf=_csf())
+    assert resolved.profile.obligaciones == ()
+    assert resolved.profile.codigo_postal is None
+
+
+# --- M2-E: the new identity facts through onboarding -------------------------------
+#
+# The use case owns no new decision here, and these tests are what proves it: the
+# resolved profile already carries the obligations and the postal code, `_unchanged`
+# compares profiles structurally, and `latest + 1` versions whatever the store holds.
+# So the new facts are versioned by the same rules as the old ones — and a change in
+# either of them is a corrected profile, never a silent in-place edit.
+
+OBLIGACIONES = (
+    ObligacionFiscal("3", "Declarar anualmente el ISR"),
+    ObligacionFiscal("9", "Declarar mensualmente el IVA."),
+)
+
+
+def test_the_persisted_profile_carries_the_obligations_and_postal_code() -> None:
+    """A1: retain -> parse -> resolve -> persist, with the new facts arriving at the store."""
+    csf = replace(_csf(), obligaciones=OBLIGACIONES, codigo_postal="97000")
+    harness = _Harness(csf=csf)
+
+    outcome = harness.onboard()
+
+    assert outcome.profile_record is not None
+    assert outcome.profile_record.profile.obligaciones == OBLIGACIONES
+    assert outcome.profile_record.profile.codigo_postal == "97000"
+    assert harness.profiles.saved == [outcome.profile_record]
+
+
+def test_a_generic_rfc_is_persisted_with_its_generic_identity() -> None:
+    """A1/D8: the generic identity is decided at resolution and stored as decided."""
+    csf = _csf(GENERIC_NACIONAL_RFC)
+    events: list[str] = []
+    profiles = _Profiles(events=events)
+    use_case = OnboardContributorUseCase(
+        sink=_Sink(artifact=_artifact(), events=events),
+        parser=_Parser(csf=csf, events=events),
+        resolver=_Resolver(
+            result=resolve_contributor_profile(
+                configured_rfc=GENERIC_NACIONAL_RFC, cert_rfc=GENERIC_NACIONAL_RFC, csf=csf
+            ),
+            events=events,
+        ),
+        artifacts=_Artifacts(events=events),
+        profiles=profiles,
+        clock=_Clock(instants=[T0, T1]),
+    )
+
+    outcome = use_case.onboard(
+        CSF_PDF, client_rfc=GENERIC_NACIONAL_RFC, cert_rfc=GENERIC_NACIONAL_RFC
+    )
+
+    assert outcome.profile_record is not None
+    assert outcome.profile_record.profile.persona_tipo is PersonaTipo.GENERICO_NACIONAL
+    assert profiles.saved == [outcome.profile_record]
+
+
+def test_re_onboarding_the_same_bytes_and_facts_writes_no_new_version() -> None:
+    """A2/D4: with the new facts equal, the confirmed version already describes this contributor."""
+    csf = replace(_csf(), obligaciones=OBLIGACIONES, codigo_postal="97000")
+    store = _Profiles(events=[])
+
+    first = _Harness(csf=csf, profiles=store).onboard()
+    second = _Harness(csf=csf, profiles=store).onboard()
+
+    assert first.profile_record is not None
+    assert second.profile_record == first.profile_record
+    assert [record.profile_version for record in store.saved] == [1]  # no version 2
+
+
+def test_changed_obligations_are_a_new_profile_version() -> None:
+    """A3: a corrected obligation list is a corrected profile — same source, new version."""
+    store = _Profiles(events=[])
+    _Harness(csf=_csf(), profiles=store).onboard()
+    corrected = (ObligacionFiscal("9", "Declarar mensualmente el IVA."),)
+
+    outcome = _Harness(csf=replace(_csf(), obligaciones=corrected), profiles=store).onboard()
+
+    assert outcome.profile_record is not None
+    assert outcome.profile_record.profile_version == 2
+    assert outcome.profile_record.profile.obligaciones == corrected
+
+
+@pytest.mark.parametrize(
+    "csf",
+    [
+        replace(_csf(), obligaciones=OBLIGACIONES),
+        replace(_csf(), codigo_postal="97000"),
+    ],
+    ids=["obligations-added", "postal-code-added"],
+)
+def test_a_change_in_either_new_fact_is_a_change_of_profile(csf: CsfData) -> None:
+    """A4: `_unchanged` compares the whole profile, so neither new fact can be ignored."""
+    store = _Profiles(events=[])
+    _Harness(csf=_csf(), profiles=store).onboard()  # the confirmed version: neither fact
+
+    outcome = _Harness(csf=csf, profiles=store).onboard()
+
+    assert outcome.profile_record is not None
+    assert outcome.profile_record.profile_version == 2
