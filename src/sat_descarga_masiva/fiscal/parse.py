@@ -6,6 +6,7 @@ review flags, and fiscal status. The infra parser only deserializes XML.
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from decimal import Decimal
 
 from sat_descarga_masiva.domain.model.fiscal_document import (
@@ -94,6 +95,7 @@ def build_fiscal_document(
             source_uuid=source_uuid,
             subtotal=None,  # nor any monetary subtotal
             descuento=None,
+            fecha=_fecha(raw.fecha),
             forma_pago=raw.forma_pago,
             metodo_pago=raw.metodo_pago,
             regimen_fiscal_receptor=raw.regimen_fiscal_receptor,
@@ -129,6 +131,7 @@ def build_fiscal_document(
             source_uuid=source_uuid,
             subtotal=None,  # unnormalizable under an unsupported currency
             descuento=None,
+            fecha=_fecha(raw.fecha),
             forma_pago=raw.forma_pago,
             metodo_pago=raw.metodo_pago,
             regimen_fiscal_receptor=raw.regimen_fiscal_receptor,
@@ -159,6 +162,7 @@ def build_fiscal_document(
         source_uuid=source_uuid,
         subtotal=_optional_amount(raw.subtotal, raw.moneda, policy),
         descuento=_optional_amount(raw.descuento, raw.moneda, policy),
+        fecha=_fecha(raw.fecha),
         forma_pago=raw.forma_pago,
         metodo_pago=raw.metodo_pago,
         regimen_fiscal_receptor=raw.regimen_fiscal_receptor,
@@ -175,6 +179,22 @@ def build_fiscal_document(
 def _source_uuid(raw: RawCfd) -> Uuid | None:
     """The TFD UUID, canonicalized. Never the source hash, filename or a generated id."""
     return Uuid(raw.uuid) if raw.uuid is not None else None
+
+
+def _fecha(value: str | None) -> date | None:
+    """The header ``Fecha`` as the calendar date a journal entry is dated by (§8a:209).
+
+    The *written* calendar date is taken, never a UTC instant: a source offset is the
+    emission's own offset, so applying it could move an entry into another period. An
+    absent or malformed value stays ``None`` — no date is invented here, and an
+    undatable document is a review case downstream (§8:159), never "today".
+    """
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value).date()
+    except ValueError:
+        return None
 
 
 def _is_non_monetary_header(raw: RawCfd) -> bool:

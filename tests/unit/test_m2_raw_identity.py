@@ -254,6 +254,7 @@ def test_new_raw_fields_default_to_none_or_empty() -> None:
     assert raw.uuid is None
     assert raw.subtotal is None
     assert raw.descuento is None
+    assert raw.fecha is None
     assert raw.forma_pago is None
     assert raw.metodo_pago is None
     assert raw.regimen_fiscal_receptor is None

@@ -299,6 +299,7 @@ def test_existing_construction_without_new_fields_remains_valid() -> None:
     assert doc.source_uuid is None
     assert doc.subtotal is None
     assert doc.descuento is None
+    assert doc.fecha is None
     assert doc.forma_pago is None
     assert doc.metodo_pago is None
     assert doc.regimen_fiscal_receptor is None
@@ -327,9 +328,11 @@ def test_existing_field_order_is_unchanged() -> None:
         "source_hash",
     ]
     assert names[10:12] == ["status", "review_flags"]
-    assert names[12:19] == list(_NEW_FIELDS)
+    # M3.3 adds the dated header field (`fecha`) into the header block M2.4a opened;
+    # no M2.4a field moved, which is what this test exists to protect.
+    assert names[12:20] == [*_NEW_FIELDS[:3], "fecha", *_NEW_FIELDS[3:]]
     # M2.4b appends `pagos` last so every earlier position is untouched.
-    assert names[19:] == ["pagos"]
+    assert names[20:] == ["pagos"]
 
 
 def test_no_second_uuid_field_was_introduced() -> None:

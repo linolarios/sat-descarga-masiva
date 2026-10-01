@@ -1,5 +1,6 @@
 """M2.3: SatcfdiFiscalParser (XML -> RawCfd) + build_fiscal_document pipeline."""
 
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -50,6 +51,15 @@ def test_ingreso_builds_parsed_document() -> None:
     assert doc.status is FiscalDocumentStatus.UNKNOWN
     assert doc.source_hash == _SOURCE_HASH
     assert doc.impuestos.traslados[0].importe == NormalizedAmount(Decimal("16.00"))
+
+
+def test_the_header_fecha_reaches_the_fiscal_model_as_a_calendar_date() -> None:
+    """§8a:209: the CFDI `Fecha` is preserved and dated — journals are dated by it."""
+    raw, result = _parse_build("cfdi_ingreso_4_0.xml")
+    assert (raw.fecha or "").startswith("2024-01-15T12:00:00")
+    doc = result.document
+    assert doc is not None
+    assert doc.fecha == date(2024, 1, 15)
 
 
 def test_egreso_parses_with_descuento() -> None:

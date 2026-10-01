@@ -328,7 +328,7 @@ def _v2_database() -> sqlite3.Connection:
     return conn
 
 
-def test_a_v2_database_upgrades_to_v3_and_keeps_its_profile_rows() -> None:
+def test_a_v2_database_upgrades_to_the_current_version_and_keeps_its_profile_rows() -> None:
     """The ladder only adds: a v2 profile row survives, its new facts reading as absent."""
     conn = _v2_database()
     assert _user_version(conn) == 2
@@ -337,14 +337,14 @@ def test_a_v2_database_upgrades_to_v3_and_keeps_its_profile_rows() -> None:
 
     init_schema(conn)
 
-    assert _user_version(conn) == SCHEMA_VERSION == 3
+    assert _user_version(conn) == SCHEMA_VERSION == 4
     assert "codigo_postal" in _columns(conn, "contributor_profiles")
     assert _table_names(conn) >= M2E_TABLES
     stored = SqliteContributorProfileRepository(conn).latest(RFC)
     assert stored is not None
     assert stored == _record(1)  # the v2 row intact, with nothing invented for the new facts
 
-    init_schema(conn)  # idempotent on an already-migrated v3 database
+    init_schema(conn)  # idempotent on an already-migrated database
     assert SqliteContributorProfileRepository(conn).latest(RFC) == _record(1)
 
 

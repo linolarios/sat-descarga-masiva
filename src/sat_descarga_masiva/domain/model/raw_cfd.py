@@ -175,6 +175,7 @@ class RawCfd:
     uuid: str | None = None
     subtotal: str | None = None
     descuento: str | None = None
+    fecha: str | None = None
     forma_pago: str | None = None
     metodo_pago: str | None = None
     regimen_fiscal_receptor: str | None = None

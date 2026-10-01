@@ -59,7 +59,7 @@ from sat_descarga_masiva.domain.model.review import (
 from sat_descarga_masiva.domain.model.source import SourceIdentity
 from sat_descarga_masiva.domain.model.value_objects import RequestId, Rfc, Uuid
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 """SQLite schema version written to ``PRAGMA user_version`` by ``init_schema``.
 
 1 = M1 ledger tables (download_jobs, download_cursors, source_records)
@@ -67,6 +67,8 @@ SCHEMA_VERSION = 3
     review_flags, pipeline_runs) + download_jobs.pipeline_run_id
 3 = M2-E identity completeness (profile_obligaciones) + a nullable
     contributor_profiles.codigo_postal
+4 = M3 accounting facts (metadata_snapshots, journal_entries, journal_lines,
+    posting_snapshot) + append-only guards on all four
 """
 
 _CREATE_DOWNLOAD_JOBS = """
@@ -246,6 +248,128 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
 )
 """
 
+# --- M3 accounting facts (§11 M3) ---------------------------------------------------
+#: §6's metadata observation — what was read, when, and the hash that proves it.
+#: ``status`` carries the fiscal vocabulary (``Vigente``/``Cancelado``); the SAT query's
+#: internal codes never reach this table (D-M3-7b). ``cancellation_date`` is the
+#: cancellation's effective date, which is also when it enters the journal (§8a:205).
+_CREATE_METADATA_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS metadata_snapshots (
+    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL,
+    contributor_rfc TEXT NOT NULL,
+    status TEXT NOT NULL,
+    cancellation_date TEXT,
+    cancellation_reason TEXT,
+    substitution_uuid TEXT,
+    retrieved_at TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    UNIQUE (uuid, contributor_rfc, retrieved_at, source_hash)
+)
+"""
+
+#: One journal entry per (contributor, source, rule, rule_version, mapping_version):
+#: ``entry_key`` is the §8:194 fingerprint, and the fields it was built from are stored
+#: beside it so the row stays auditable without decoding the key. ``posting_state`` is
+#: one of the three words of §8:166 and is never updated (see the guards below). No
+#: ``perspective`` column: §8:194 encodes EMITIDO/RECIBIDO in the rule id. ``source_uuid``
+#: is NOT NULL because an entry without it has no fingerprint to be keyed by — the
+#: missing-identity case is a review flag on the document, never a keyless entry (§8:158).
+_CREATE_JOURNAL_ENTRIES = """
+CREATE TABLE IF NOT EXISTS journal_entries (
+    entry_key TEXT PRIMARY KEY,
+    contributor_rfc TEXT NOT NULL,
+    source_uuid TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    rule_version TEXT NOT NULL,
+    mapping_version TEXT NOT NULL,
+    posting_state TEXT NOT NULL,
+    entry_date TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+)
+"""
+
+#: One leg per row: ``(entry_key, line_key)`` identifies it (§8:194) and ``ordinal``
+#: records the order the rule proposed. ``amount`` is TEXT — money is Decimal end to end
+#: and never REAL (§4). An entry may have zero legs (§8a:204's 4.10/4.13 drafts), so
+#: nothing requires a leg. The parent link is a recorded key verified by the test suite;
+#: SQLite foreign keys are not enforced anywhere in this repository (M2-E convention).
+_CREATE_JOURNAL_LINES = """
+CREATE TABLE IF NOT EXISTS journal_lines (
+    entry_key TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    line_key TEXT NOT NULL,
+    account_role TEXT NOT NULL,
+    side TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    PRIMARY KEY (entry_key, line_key),
+    UNIQUE (entry_key, ordinal)
+)
+"""
+
+#: The evidence of one posting, written with the entry: the extracted XML hash plus the
+#: rule/policy/mapping versions that produced it, so the posting can be explained later
+#: without re-reading the source. The FX columns are filled only when a conversion was
+#: needed (§8:192); the rate is TEXT like every other amount.
+_CREATE_POSTING_SNAPSHOT = """
+CREATE TABLE IF NOT EXISTS posting_snapshot (
+    entry_key TEXT PRIMARY KEY,
+    source_hash TEXT NOT NULL,
+    rule_version TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    mapping_version TEXT NOT NULL,
+    posted_at TEXT NOT NULL,
+    valuation_date TEXT,
+    valuation_source TEXT,
+    valuation_rate TEXT
+)
+"""
+
+_M3_FACT_TABLES: tuple[str, ...] = (
+    _CREATE_METADATA_SNAPSHOTS,
+    _CREATE_JOURNAL_ENTRIES,
+    _CREATE_JOURNAL_LINES,
+    _CREATE_POSTING_SNAPSHOT,
+)
+
+#: The only database-level enforcement in this repository: an accounting fact is written
+#: once (§8:166). UPDATE and DELETE abort, so a rewritten posting state or a silently
+#: re-amounted leg is not merely forbidden by convention — SQLite refuses it. Guard names
+#: are derived from the table, and ``IF NOT EXISTS`` keeps re-running ``init_schema`` on an
+#: existing database a no-op.
+_APPEND_ONLY_TABLES: tuple[str, ...] = (
+    "metadata_snapshots",
+    "journal_entries",
+    "journal_lines",
+    "posting_snapshot",
+)
+
+
+def _append_only_guards(table: str) -> tuple[str, str]:
+    """The two triggers that freeze ``table``, named after it so the guard is traceable."""
+    return (
+        f"""
+CREATE TRIGGER IF NOT EXISTS {table}_no_update
+BEFORE UPDATE ON {table}
+BEGIN
+    SELECT RAISE(ABORT, '{table} is append-only: a fact is written once (§8)');
+END
+""",
+        f"""
+CREATE TRIGGER IF NOT EXISTS {table}_no_delete
+BEFORE DELETE ON {table}
+BEGIN
+    SELECT RAISE(ABORT, '{table} is append-only: a fact is never erased (§8)');
+END
+""",
+    )
+
+
+_APPEND_ONLY_GUARDS: tuple[str, ...] = tuple(
+    statement for table in _APPEND_ONLY_TABLES for statement in _append_only_guards(table)
+)
+
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (_CREATE_DOWNLOAD_JOBS, _CREATE_DOWNLOAD_CURSORS, _CREATE_SOURCE_RECORDS),
     2: (
@@ -257,6 +381,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         _CREATE_PIPELINE_RUNS,
     ),
     3: (_CREATE_PROFILE_OBLIGACIONES,),
+    4: (*_M3_FACT_TABLES, *_APPEND_ONLY_GUARDS),
 }
 
 _DOCUMENT_COLUMNS = """
@@ -441,7 +566,7 @@ def _ensure_profile_postal_code(conn: sqlite3.Connection) -> None:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Create/migrate the SQLite schema up to :data:`SCHEMA_VERSION` (§11 M2).
+    """Create/migrate the SQLite schema up to :data:`SCHEMA_VERSION` (§11).
 
     Authoritative entry point for the application: applies every missing
     migration step in order (``CREATE TABLE IF NOT EXISTS`` only), then advances

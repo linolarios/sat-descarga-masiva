@@ -51,6 +51,7 @@ class SatcfdiFiscalParser:
             version=_required(root, "Version"),
             moneda=_required(root, "Moneda"),
             tipo_cambio=_text(root.get("TipoCambio")),
+            fecha=_date_or_none(root.get("Fecha")),
             emisor_rfc=_required(_map(root.get("Emisor"), "Emisor"), "Rfc"),
             receptor_rfc=_required(receptor, "Rfc"),
             conceptos=tuple(_concepto(c) for c in concepto_nodes),
@@ -84,6 +85,16 @@ def _date(value: object | None) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return _text(value) or ""
+
+
+def _date_or_none(value: object | None) -> str | None:
+    """ISO-8601 text for an *optional* satcfdi datetime; absent stays absent.
+
+    Unlike the TFD's ``FechaTimbrado``, the comprobante header's ``Fecha`` is not
+    guaranteed present, and a document without it must not acquire one here: the
+    fiscal layer decides what an undatable document means (§8a:209).
+    """
+    return _date(value) or None
 
 
 def _map(value: object, what: str) -> Node:

@@ -7,6 +7,7 @@ flags are additive review state; amounts are MoneyPolicy-normalized.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 
@@ -210,6 +211,9 @@ class FiscalDocument:
     source_uuid: Uuid | None = None
     subtotal: NormalizedAmount | None = None
     descuento: NormalizedAmount | None = None
+    #: The CFDI ``Fecha`` as a calendar date (§8a:209): what a journal entry is dated by.
+    #: Absent when the source carries no parsable Fecha — never invented, never today.
+    fecha: date | None = None
     forma_pago: str | None = None
     metodo_pago: str | None = None
     regimen_fiscal_receptor: str | None = None

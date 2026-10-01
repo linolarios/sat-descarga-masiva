@@ -1,5 +1,6 @@
 """M2.3: build_fiscal_document — RawCfd -> FiscalDocument via MoneyPolicy."""
 
+from datetime import date
 from decimal import Decimal
 
 from sat_descarga_masiva.domain.model.fiscal_document import (
@@ -101,3 +102,28 @@ def test_retention_amounts_normalized() -> None:
     doc = result.document
     assert doc is not None
     assert doc.impuestos.retenciones[0].importe == NormalizedAmount(Decimal("10.00"))
+
+
+# --- the header Fecha (§8a:209) ---------------------------------------------
+
+
+def test_fecha_is_dated_from_the_source_text() -> None:
+    """`Fecha` becomes the calendar date a journal entry is dated by — offset and all."""
+    doc = build_fiscal_document(_raw(fecha="2026-01-15T12:00:00+00:00"), SOURCE_HASH).document
+    assert doc is not None
+    assert doc.fecha == date(2026, 1, 15)
+
+
+def test_the_written_calendar_date_survives_a_source_offset() -> None:
+    """The offset is not applied: a journal date is the document's date, not a UTC instant."""
+    doc = build_fiscal_document(_raw(fecha="2026-01-15T23:30:00-06:00"), SOURCE_HASH).document
+    assert doc is not None
+    assert doc.fecha == date(2026, 1, 15)  # 2026-01-16 in UTC, and not what a ledger wants
+
+
+def test_an_absent_or_malformed_fecha_stays_absent() -> None:
+    """No date is invented here: an undatable document is a downstream review case (§8:159)."""
+    for fecha in (None, "", "2026-13-45", "not a date"):
+        doc = build_fiscal_document(_raw(fecha=fecha), SOURCE_HASH).document
+        assert doc is not None
+        assert doc.fecha is None

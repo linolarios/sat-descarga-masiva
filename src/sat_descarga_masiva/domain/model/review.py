@@ -55,9 +55,6 @@ class ReviewFlagType(StrEnum):
     FX_DIFFERENCE_UNCONFIRMED = "fx_difference_unconfirmed"
     PARTIAL_PAYMENT_REVERSAL_UNSPECIFIED = "partial_payment_reversal_unspecified"
 
-    # NOTE: a régimen-specific treatment (§8) is deliberately absent — no M3 rule
-    # branches on régimen, so nothing could raise it. It arrives with its first rule.
-
 
 class ReviewFlagState(StrEnum):
     OPEN = "open"
