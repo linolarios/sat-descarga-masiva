@@ -211,8 +211,8 @@ Monthly per-vendor report of IVA pagado/acreditable/retenido/trasladado, **for a
 - **M5 — DIOT (`diot/`).** Per §9.
 - **M6 — CLI + Settings.** The two flows + `ConfigEditor` + logging. `ai/` stub anytime.
 
-**Hardening backlog (recorded so it isn't lost; schedule after M2.8):**
-- **M1-H — wire error classification into the download flow.** `ErrorClassification`/`classify()` exists as a table + table-test but has **no production caller** — so `5003`/`5004`/`5011`/`5005` handling in the Download flow (§7) is specified but *unimplemented* (retries are currently exception-driven only). Wire `classify()` into the gateway/use case: `5003`→partition, `5011`→wait/resume, `5004`→per-client empty, `300`/`304`/`305`+`301`/`302`/`303`/`5002`+`5005`→abort, transient set→retry. TDD against `FakeSatGateway` returning those codes (the live tier can *hit* these but only the fake tier can *prove* them deterministically). This changes M1 behavior — its own milestone, **not** folded into M2.8.
+**Hardening backlog (recorded so it isn't lost; schedule after M2 — M2 is frozen, M2.8 closed at `6b02b3a`):**
+- **M1-H — wire error classification into the download flow.** `ErrorClassification`/`classify()` exists as a table + table-test but has **no production caller** — so `5003`/`5004`/`5011`/`5005` handling in the Download flow (§7) is specified but *unimplemented* (retries are currently exception-driven only). Wire `classify()` into the gateway/use case: `5003`→partition, `5011`→wait/resume, `5004`→per-client empty, `300`/`304`/`305`+`301`/`302`/`303`/`5002`+`5005`→abort, transient set→retry. TDD against `FakeSatGateway` returning those codes (the live tier can *hit* these but only the fake tier can *prove* them deterministically). This changes M1 behavior — its own milestone, kept separate from M2.
 - **M3-prereq (already noted at §11 M3):** migrate `download_jobs`/`download_cursors` off `INSERT OR REPLACE` before any FK references them.
   *M2–M5 are offline and fully testable on sample XMLs, independent of M1.*
 
