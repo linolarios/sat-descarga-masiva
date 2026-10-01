@@ -21,7 +21,18 @@ class Direction(StrEnum):
 
 
 class DocumentStatus(StrEnum):
-    # TODO: confirm exact catalog values against the SAT Solicitud doc.
+    """The **query** side's status filter for a Solicitud — not received status.
+
+    These are our own codes for the *filter* a download query asks for, and they
+    are what a persisted query record carries (``infrastructure/source/codec.py``).
+    The SOAP boundary maps them to satcfdi's word vocabulary
+    (``'Todos'``/``'Vigente'``/``'Cancelado'``); those words never reach the
+    domain (§5).
+
+    A downloaded document's own status is a **different** vocabulary:
+    ``domain.model.fiscal_document.FiscalDocumentStatus`` (§6a).
+    """
+
     TODOS = "0"
     VIGENTE = "1"
     CANCELADO = "2"
