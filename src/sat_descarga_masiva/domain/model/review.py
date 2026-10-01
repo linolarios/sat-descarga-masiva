@@ -18,10 +18,45 @@ from enum import StrEnum
 
 
 class ReviewFlagType(StrEnum):
+    """Why a document or an entry needs a human decision (§8).
+
+    A flag is *review* state, never a posting state: it records that a human must
+    decide, and it can never make anything post. Values are persisted TEXT, so an
+    existing value is never renamed — §8's vocabulary only grows.
+    """
+
+    # Parse/composition — M2's producers (parser, perspective, signature).
     UNSUPPORTED_CURRENCY = "unsupported_currency"
     PERSPECTIVE_MISMATCH = "perspective_mismatch"
     PERSPECTIVE_UNDETERMINED = "perspective_undetermined"
     CFDI_SIGNATURE = "cfdi_signature"
+
+    # Posting eligibility — the PostingEligibilityValidator's refusal reasons (§8).
+    # Raised once per document by the validator; a rule never raises one itself.
+    UNSUPPORTED_RULE = "unsupported_rule"
+    MISSING_SOURCE_FIELD = "missing_source_field"
+    MISSING_POSTING_IDENTITY = "missing_posting_identity"
+    UNMAPPED_ACCOUNT = "unmapped_account"
+    UNBALANCED_ENTRY = "unbalanced_entry"
+    AMBIGUOUS_FX = "ambiguous_fx"
+
+    # Rules — declared by a rule's review_conditions (§8 rule contract).
+    MISSING_REP_ORIGINAL = "missing_rep_original"
+    REP_INVARIANT_VIOLATION = "rep_invariant_violation"
+    PAYROLL_DRAFT_UNSUPPORTED = "payroll_draft_unsupported"
+    RETENCION_DRAFT_UNSUPPORTED = "retencion_draft_unsupported"
+
+    # Temporal cancellation — status from the MetadataSnapshot join (§8).
+    INELIGIBLE_SOURCE_STATE = "ineligible_source_state"
+
+    # ⚠ Pending contador confirmation (§8a): these paths may flag, and must never post.
+    IEPS_CREDITABLE_UNCONFIRMED = "ieps_creditable_unconfirmed"
+    EGRESO_IVA_EVIDENCE_MISSING = "egreso_iva_evidence_missing"
+    FX_DIFFERENCE_UNCONFIRMED = "fx_difference_unconfirmed"
+    PARTIAL_PAYMENT_REVERSAL_UNSPECIFIED = "partial_payment_reversal_unspecified"
+
+    # NOTE: a régimen-specific treatment (§8) is deliberately absent — no M3 rule
+    # branches on régimen, so nothing could raise it. It arrives with its first rule.
 
 
 class ReviewFlagState(StrEnum):
@@ -32,13 +67,20 @@ class ReviewFlagState(StrEnum):
 class ReviewSubjectKind(StrEnum):
     """What a persisted review fact is attached to.
 
-    M2 has exactly one producer of persisted flags — the per-document fiscal
-    review (M2.6) — so only ``DOCUMENT`` exists today. §8's entries are the same
-    shape and extend this column additively (the value is stored as TEXT), so
-    nothing is built here for M3.
+    ``DOCUMENT`` is the per-document fiscal review (M2.6), keyed on the CFDI's TFD
+    UUID (§6). ``JOURNAL_ENTRY`` is the accounting review (§8): an entry carries
+    review state of its own — "a PROPOSED entry the validator could not post, **or**
+    any entry carrying an open flag" — so review facts attach to entries as well as
+    to documents.
+
+    A ``JOURNAL_ENTRY``'s ``subject_id`` is the entry's ``PostingFingerprint``
+    (§8): it is unique per entry by construction and stable across runs, unlike a
+    surrogate row id. The column is TEXT, so adding a kind rewrites no persisted
+    row and needs no migration.
     """
 
     DOCUMENT = "document"
+    JOURNAL_ENTRY = "journal_entry"
 
 
 @dataclass(frozen=True)
