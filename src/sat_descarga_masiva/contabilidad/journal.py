@@ -11,6 +11,13 @@ A rule is a pure function: it reads the fiscal model and returns a
 - the mapping is absent. A rule names :class:`AccountRole`s; which account a role
   resolves to — and under which ``mapping_version`` — is the mapping's decision
   (§8:196), so the mapping version enters only when a fingerprint is computed.
+
+What a rule *assumes* is likewise not a line. ``ASSUMED_PUE`` is accounting
+evidence — "this clearing leg is the SAT's PUE presumption, not verified payment"
+(§8:171) — so it travels on the entry as an :class:`AccountingAssumption`, never
+inside a ``line_key``: the key is §8:194's structural identity for a leg, and an
+assumption that may later be promoted to ``SUPPORTED_BY_BANK`` must not be able to
+redefine it.
 """
 
 from __future__ import annotations
@@ -52,6 +59,20 @@ class LineSide(StrEnum):
         return LineSide.HABER if self is LineSide.DEBE else LineSide.DEBE
 
 
+class AccountingAssumption(StrEnum):
+    """What a rule presumed rather than verified — evidence about an entry (§8:171).
+
+    An assumption is deliberately *not* a leg and not a ``line_key``: §8:194's key is the
+    structural identity of a line, and §8:171's ``ASSUMED_PUE`` is a statement about the
+    world (the SAT presumes a PUE comprobante paid in one exhibition; no bank movement was
+    confirmed) that a later reconciliation promotes to ``SUPPORTED_BY_BANK``. Recording it
+    beside the legs keeps a posting explainable without letting the assumption redefine which
+    facts were posted. Values are persisted TEXT, so an existing value is never renamed.
+    """
+
+    ASSUMED_PUE = "assumed_pue"
+
+
 @dataclass(frozen=True)
 class JournalLine:
     """One leg of an entry: a semantic role, one side, one positive amount (§8a).
@@ -72,10 +93,11 @@ class JournalLine:
                 "a journal line needs a non-empty line_key: §8:194 identifies the lines of"
                 " one entry by it, and the empty key belongs to the entry itself"
             )
-        if self.amount.amount <= 0:
+        if not self.amount.amount.is_finite() or self.amount.amount <= 0:
             raise ValueError(
                 f"a journal line moves a strictly positive amount, got {self.amount.amount}:"
-                " a sign is not a second way to name the side"
+                " a sign is not a second way to name the side, and a corrupt (non-finite)"
+                " amount is not an amount at all (§8:159)"
             )
 
 
@@ -120,6 +142,11 @@ class ProposedJournalEntry:
 
     ``mapping_version`` is likewise absent: it is an argument of :meth:`fingerprint`,
     because a rule is role-typed and the mapping is resolved after it runs (§8:196).
+
+    ``assumptions`` carries what the rule *presumed* rather than verified (§8:171) — evidence
+    about the entry, never part of the entry's or a leg's identity. It is deliberately not a
+    ``line_key``: §8:194's key is structural, so an assumption that a later reconciliation
+    promotes to `SUPPORTED_BY_BANK` may change without changing which facts were posted.
     """
 
     rule_id: str
@@ -129,6 +156,7 @@ class ProposedJournalEntry:
     source_hash: str
     entry_date: date
     lines: tuple[JournalLine, ...]
+    assumptions: tuple[AccountingAssumption, ...] = ()
 
     def __post_init__(self) -> None:
         keys = [line.line_key for line in self.lines]
@@ -137,6 +165,11 @@ class ProposedJournalEntry:
             raise ValueError(
                 f"line_key identifies a line within its entry (§8:194), so it cannot repeat:"
                 f" {repeated}"
+            )
+        if len(set(self.assumptions)) != len(self.assumptions):
+            raise ValueError(
+                "an assumption is evidence about the entry, so stating one twice adds nothing:"
+                f" {[item.value for item in self.assumptions]}"
             )
 
     @property

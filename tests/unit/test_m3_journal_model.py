@@ -12,7 +12,10 @@ Three of §8's invariants are structural here rather than checked later:
 - `line_key` is non-empty and unique within its entry: §8:194 distinguishes the
   *lines of one entry* by it, and the empty key is reserved for the entry itself;
 - `mapping_version` is an argument to the fingerprint, never a field of the entry —
-  a rule targets `AccountRole`s and never sees the chart of accounts (§8:196).
+  a rule targets `AccountRole`s and never sees the chart of accounts (§8:196);
+- `assumptions` records what a rule *presumed* rather than verified (§8:171) as
+  entry-level evidence — deliberately not a `line_key`, so promoting an assumption
+  later cannot change which facts were posted (§8:194).
 """
 
 from dataclasses import fields
@@ -22,6 +25,7 @@ from decimal import Decimal
 import pytest
 
 from sat_descarga_masiva.contabilidad.journal import (
+    AccountingAssumption,
     JournalLine,
     LineSide,
     PostingFingerprint,
@@ -75,6 +79,9 @@ def _entry(**overrides: object) -> ProposedJournalEntry:
 
 def test_the_posting_states_are_the_three_from_8_166() -> None:
     assert {state.value for state in PostingState} == {"proposed", "posted", "skipped"}
+    # §8:167: `NEEDS_REVIEW` is a *review condition* ("a PROPOSED entry the validator could
+    # not post, or any entry carrying an open flag"), never a fourth posting state.
+    assert not hasattr(PostingState, "NEEDS_REVIEW")
 
 
 def test_a_rule_builds_a_proposed_entry_and_cannot_express_a_posted_one() -> None:
@@ -102,6 +109,13 @@ def test_a_leg_is_one_side_of_the_entry_never_a_signed_pair() -> None:
 @pytest.mark.parametrize("amount", ("0.00", "-116.00"))
 def test_a_leg_refuses_a_non_positive_amount(amount: str) -> None:
     """A leg that moves nothing is not a leg; a sign is not a second way to say 'haber'."""
+    with pytest.raises(ValueError, match="positive amount"):
+        _line(amount=amount)
+
+
+@pytest.mark.parametrize("amount", ("NaN", "sNaN", "Infinity", "-Infinity"))
+def test_a_leg_refuses_a_corrupt_amount(amount: str) -> None:
+    """§8:159/§12: a non-finite amount is a corrupt source value, not a posting."""
     with pytest.raises(ValueError, match="positive amount"):
         _line(amount=amount)
 
@@ -183,6 +197,35 @@ def test_an_entry_without_legs_balances_arithmetically() -> None:
 def test_the_entry_keeps_its_accounting_date() -> None:
     """§8a:208: the CFDI date drives journal dating (and 4.15's cancellation period)."""
     assert _entry().entry_date == date(2026, 1, 31)
+
+
+# --- accounting assumptions are evidence, not identity (§8:171) ---------------------
+
+
+def test_an_entry_records_an_assumption_beside_its_lines() -> None:
+    """§8:171: `ASSUMED_PUE` is evidence about the entry — never a leg of it."""
+    entry = _entry(assumptions=(AccountingAssumption.ASSUMED_PUE,))
+    assert entry.assumptions == (AccountingAssumption.ASSUMED_PUE,)
+    assert AccountingAssumption.ASSUMED_PUE == "assumed_pue"
+    assert all("assumed_pue" not in line.line_key for line in entry.lines)
+
+
+def test_an_entry_without_assumptions_presumes_nothing() -> None:
+    """The default is the honest one: a rule states an assumption only when it made one."""
+    assert _entry().assumptions == ()
+
+
+def test_an_assumption_never_redefines_line_identity() -> None:
+    """§8:194: the key is over structural `line_key`s, so evidence semantics cannot move it."""
+    plain = _entry(assumptions=())
+    assumed = _entry(assumptions=(AccountingAssumption.ASSUMED_PUE,))
+    assert plain.line_fingerprints(MAPPING_VERSION) == assumed.line_fingerprints(MAPPING_VERSION)
+    assert plain.fingerprint(MAPPING_VERSION) == assumed.fingerprint(MAPPING_VERSION)
+
+
+def test_an_entry_refuses_the_same_assumption_twice() -> None:
+    with pytest.raises(ValueError, match="assumption"):
+        _entry(assumptions=(AccountingAssumption.ASSUMED_PUE, AccountingAssumption.ASSUMED_PUE))
 
 
 # --- PostingFingerprint (§8:194) ----------------------------------------------------
