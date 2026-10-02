@@ -66,3 +66,16 @@ class ReviewFlagNotFound(SatClientError):
 
 
 class CsfParseError(SatClientError): ...
+
+
+class MappingNotConfigured(SatClientError):
+    """No account mapping exists for that client (§8a:207).
+
+    A configuration failure, not a document-level review case: without a chart of
+    accounts the engine could not book *any* of the client's documents, so the run
+    stops loudly instead of falling back to a guessed account.
+    """
+
+
+class InvalidMapping(SatClientError):
+    """A mapping source does not describe a usable, versioned account mapping (§8a:207)."""
