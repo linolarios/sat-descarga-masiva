@@ -32,13 +32,15 @@ class ReviewFlagType(StrEnum):
     CFDI_SIGNATURE = "cfdi_signature"
 
     # Posting eligibility — the PostingEligibilityValidator's refusal reasons (§8).
-    # Raised once per document by the validator; a rule never raises one itself.
+    # Raised once per document by the validator, or by the selector/rule that finds no
+    # supported treatment for the document's shape (§8:161).
     UNSUPPORTED_RULE = "unsupported_rule"
     MISSING_SOURCE_FIELD = "missing_source_field"
     MISSING_POSTING_IDENTITY = "missing_posting_identity"
     UNMAPPED_ACCOUNT = "unmapped_account"
     UNBALANCED_ENTRY = "unbalanced_entry"
     AMBIGUOUS_FX = "ambiguous_fx"
+    INVALID_AMOUNT = "invalid_amount"  # a corrupt, non-finite or non-positive Decimal
 
     # Rules — declared by a rule's review_conditions (§8 rule contract).
     MISSING_REP_ORIGINAL = "missing_rep_original"
@@ -46,8 +48,12 @@ class ReviewFlagType(StrEnum):
     PAYROLL_DRAFT_UNSUPPORTED = "payroll_draft_unsupported"
     RETENCION_DRAFT_UNSUPPORTED = "retencion_draft_unsupported"
 
-    # Temporal cancellation — status from the MetadataSnapshot join (§8).
+    # The source-state gate at posting time — the latest *known* status (§8:159/194).
+    # `INELIGIBLE` is a known cancellation; `UNKNOWN` is a status nobody has resolved yet,
+    # and "nothing uncertain is posted", so it fails the same gate rather than being taken
+    # as a presumption that an unread status is vigente.
     INELIGIBLE_SOURCE_STATE = "ineligible_source_state"
+    UNKNOWN_SOURCE_STATE = "unknown_source_state"
 
     # ⚠ Pending contador confirmation (§8a): these paths may flag, and must never post.
     IEPS_CREDITABLE_UNCONFIRMED = "ieps_creditable_unconfirmed"
