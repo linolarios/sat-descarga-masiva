@@ -1,0 +1,15 @@
+# Minimal chart of accounts for one test client (§8a:207).
+#
+# The file is named after the managed client's RFC: the provider resolves
+# `<root>/<RFC>.yaml`, so a client's mapping is an explicit, versioned artifact. Only the
+# roles the emitter-side income rules (4.1/4.2) resolve are listed — every other role is
+# deliberately absent, which is the UNMAPPED_ACCOUNT case the validator flags rather than
+# defaulting to an account.
+mapping_version: "2026.01"
+
+accounts:
+  ingresos: "401-001"
+  clientes: "105-001"
+  clearing: "102-099"
+  iva_trasladado_cobrado: "208-001"
+  iva_trasladado_no_cobrado: "209-001"
