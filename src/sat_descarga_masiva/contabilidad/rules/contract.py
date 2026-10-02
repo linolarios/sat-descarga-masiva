@@ -1,20 +1,23 @@
-"""What a rule reads, and the only two answers it may give (§8:173's rule contract).
+"""What a rule reads, and the only three answers it may give (§8:173's rule contract).
 
 A rule is a pure function over a `PostingContext` — one contributor's books, one fiscal
-document, one resolved perspective — and it answers with **either**
+document, one resolved perspective — and it answers with **exactly one of**
 
-* a `ProposedJournalEntry` (its calculation of the document's bookkeeping expression), or
+* a `ProposedJournalEntry` (its calculation of the document's bookkeeping expression),
 * a `Skip`: a zero-line entry plus the declaration that the document is *deliberately
-  outside accounting scope* (§8:161).
+  outside accounting scope* (§8:161), or
+* a `ReviewRequest`: the entry it could not safely post, plus why a human must decide
+  (§8:173's "preconditions … unmet ⇒ `NEEDS_REVIEW`").
 
-The distinction is the engine's safety margin, not a convenience. ``POSTED`` is absent
+The three-way split is the engine's safety margin, not a convenience. ``POSTED`` is absent
 from this module's vocabulary because §8:159 gives that word to the
 `PostingEligibilityValidator` alone; `ProposedJournalEntry.posting_state` is derived and
-always ``PROPOSED``, so a rule cannot assign a posting state even by mistake. `Skip`
-cannot carry legs either — "deliberately out of scope" and "has journal lines" are
-contradictory — so the combination is refused when it is constructed rather than
-discovered later. And a `Skip` still carries the source provenance the ledger keys on
-(§8:169/194): skipping a document is an auditable fact, not a silence.
+always ``PROPOSED``, so a rule cannot assign a posting state even by mistake. Nor can a
+rule *refuse* by proposing nothing: "deliberately out of scope" (`Skip`) and "cannot safely
+determine" (`ReviewRequest`) are different claims with different consequences, and both are
+refused when they contradict themselves — a `Skip` cannot carry legs, a `ReviewRequest`
+cannot be silent. Each still carries the source provenance the ledger keys on
+(§8:169/194): skipping or flagging a document is an auditable fact, not a silence.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from dataclasses import dataclass
 from sat_descarga_masiva.contabilidad.journal import ProposedJournalEntry
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument
 from sat_descarga_masiva.domain.model.perspective import Perspective
+from sat_descarga_masiva.domain.model.review import ReviewFlag
 from sat_descarga_masiva.domain.model.value_objects import Rfc
 
 
@@ -67,3 +71,39 @@ class Skip:
             )
         if not self.detail.strip():
             raise ValueError("a skip must say why the document is out of scope (§8:161)")
+
+
+@dataclass(frozen=True)
+class ReviewRequest:
+    """A rule's declaration that §8:173's preconditions are unmet: a human must decide.
+
+    The mirror of :class:`Skip`, and the reason neither ``POSTED`` nor ``NEEDS_REVIEW`` is a
+    word this module can say: ``SKIPPED`` asserts *no human decision is needed*, this asserts
+    one is, and §8:159 gives both posting words to the `PostingEligibilityValidator`. A rule
+    that cannot compute therefore *proposes and says so* — it never returns a silent empty
+    entry, because §8:173's unmet precondition is a review fact with a reason, not a blank.
+
+    ``flags`` is non-empty by construction: a review request that cannot name why would be
+    indistinguishable from a rule that simply stopped. Each flag carries its own ``reason``,
+    the specific sentence a human reads — the flag *type* is the machine-readable bit, so a
+    reworded reason can never change a decision (§8:167).
+
+    ``entry`` is the entry the rule could not safely post, and may carry legs: §8a:212's
+    credit note is exactly "propose the commercial correction, flag the IVA reversal". It is
+    ``None`` only when the document itself cannot be keyed — §8:194 keys an entry by its
+    source UUID and §8a:209 forbids inventing a date — so an undatable or unidentified
+    document is flagged on the *document* rather than on an entry that could not exist.
+    """
+
+    flags: tuple[ReviewFlag, ...]
+    detail: str
+    entry: ProposedJournalEntry | None = None
+
+    def __post_init__(self) -> None:
+        if not self.flags:
+            raise ValueError(
+                "a review request must name why a human is needed: §8:173's unmet"
+                " precondition is a reason, not an empty proposal"
+            )
+        if not self.detail.strip():
+            raise ValueError("a review request must say what it could not decide (§8:173)")

@@ -29,9 +29,10 @@ from sat_descarga_masiva.contabilidad.journal import (
     ProposedJournalEntry,
 )
 from sat_descarga_masiva.contabilidad.roles import AccountRole
-from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, Skip
+from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, ReviewRequest, Skip
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument, Impuestos
 from sat_descarga_masiva.domain.model.perspective import Perspective
+from sat_descarga_masiva.domain.model.review import ReviewFlag, ReviewFlagType
 from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
 from sat_descarga_masiva.domain.policy.money import NormalizedAmount
 
@@ -113,3 +114,37 @@ def test_the_context_is_exactly_the_books_the_document_and_the_perspective() -> 
         "document",
         "perspective",
     ]
+
+
+# --- the third answer: a rule that cannot compute says so (§8:173) --------------------
+
+
+def test_a_review_request_wraps_the_entry_it_could_not_post() -> None:
+    """§8a:212: a rule may propose a correction *and* refuse to post it — both facts are kept."""
+    review = ReviewRequest(
+        flags=(ReviewFlag(ReviewFlagType.REP_INVARIANT_VIOLATION, "saldo mismatch"),),
+        detail="the payment does not reconcile with its original",
+        entry=_entry(lines=(LEG,)),
+    )
+    assert review.entry is not None and review.entry.lines == (LEG,)
+    assert review.entry.posting_state is PostingState.PROPOSED
+
+
+def test_a_review_request_without_an_entry_flags_the_document() -> None:
+    """§8:167: an undatable, unidentified document is flagged on itself, not on a fake entry."""
+    review = ReviewRequest(
+        flags=(ReviewFlag(ReviewFlagType.MISSING_POSTING_IDENTITY, "no TFD UUID"),),
+        detail="the document carries no identity to key an entry by",
+    )
+    assert review.entry is None
+
+
+def test_a_review_request_must_name_a_reason() -> None:
+    """§8:173: an unmet precondition is a *reason*; silence would be a rule that stopped."""
+    with pytest.raises(ValueError, match="must name why"):
+        ReviewRequest(flags=(), detail="something is off")
+
+
+def test_a_review_request_must_say_what_it_could_not_decide() -> None:
+    with pytest.raises(ValueError, match="must say what"):
+        ReviewRequest(flags=(ReviewFlag(ReviewFlagType.AMBIGUOUS_FX, "no rate"),), detail="   ")

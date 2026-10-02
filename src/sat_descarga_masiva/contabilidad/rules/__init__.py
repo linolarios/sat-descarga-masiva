@@ -1,8 +1,10 @@
 """Rules 4.x — pure functions that propose; the validator decides (§8:159).
 
-``contract`` holds what a rule reads (`PostingContext`) and the only two answers it may
-give (`ProposedJournalEntry`, or `Skip`); ``scope`` holds §8:161's exhaustive ``SKIPPED``
-set. The rules that post arrive one at a time, each with golden and mutation tests (§12).
+``contract`` holds what a rule reads (`PostingContext`) and the only three answers it may
+give (`ProposedJournalEntry`, `Skip`, or `ReviewRequest`); ``scope`` holds §8:161's exhaustive
+``SKIPPED`` set, and ``posting`` holds the posting rules of §8's table plus the selector that
+picks between them (`propose`). The rules arrive one at a time, each with golden and mutation
+tests (§12).
 
 Conventions every rule follows:
 
