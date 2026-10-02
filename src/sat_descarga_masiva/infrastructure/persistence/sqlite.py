@@ -59,7 +59,7 @@ from sat_descarga_masiva.domain.model.review import (
 from sat_descarga_masiva.domain.model.source import SourceIdentity
 from sat_descarga_masiva.domain.model.value_objects import RequestId, Rfc, Uuid
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 """SQLite schema version written to ``PRAGMA user_version`` by ``init_schema``.
 
 1 = M1 ledger tables (download_jobs, download_cursors, source_records)
@@ -69,6 +69,9 @@ SCHEMA_VERSION = 4
     contributor_profiles.codigo_postal
 4 = M3 accounting facts (metadata_snapshots, journal_entries, journal_lines,
     posting_snapshot) + append-only guards on all four
+5 = M3 accounting assumptions: journal_entries.assumptions, the §8:171 evidence a
+    rule presumed (a JSON array of the stable ``AccountingAssumption`` words, ``[]``
+    when it presumed nothing)
 """
 
 _CREATE_DOWNLOAD_JOBS = """
@@ -275,6 +278,13 @@ CREATE TABLE IF NOT EXISTS metadata_snapshots (
 #: ``perspective`` column: §8:194 encodes EMITIDO/RECIBIDO in the rule id. ``source_uuid``
 #: is NOT NULL because an entry without it has no fingerprint to be keyed by — the
 #: missing-identity case is a review flag on the document, never a keyless entry (§8:158).
+#: ``assumptions`` is the §8:171 evidence a rule presumed, as a JSON array of the stable
+#: ``AccountingAssumption`` words — evidence *about* the entry, never part of its key or a
+#: leg's (§8:194), which is why no fingerprint depends on it. It is NOT NULL DEFAULT '[]'
+#: because ``[]`` is the domain's own value for "presumed nothing", so an unassumed entry
+#: needs no special case; a writer that omits the column is indistinguishable from a rule
+#: that presumed nothing, so the journal writer must state its assumptions explicitly.
+#: A later promotion (§8:171) is a new record: the table is append-only.
 _CREATE_JOURNAL_ENTRIES = """
 CREATE TABLE IF NOT EXISTS journal_entries (
     entry_key TEXT PRIMARY KEY,
@@ -286,7 +296,8 @@ CREATE TABLE IF NOT EXISTS journal_entries (
     mapping_version TEXT NOT NULL,
     posting_state TEXT NOT NULL,
     entry_date TEXT NOT NULL,
-    recorded_at TEXT NOT NULL
+    recorded_at TEXT NOT NULL,
+    assumptions TEXT NOT NULL DEFAULT '[]'
 )
 """
 
@@ -382,6 +393,11 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     ),
     3: (_CREATE_PROFILE_OBLIGACIONES,),
     4: (*_M3_FACT_TABLES, *_APPEND_ONLY_GUARDS),
+    # A column, not a table: ``CREATE TABLE IF NOT EXISTS`` cannot add one to the table
+    # step 4 already created, and an unconditional ALTER here would collide with the
+    # column a fresh database was just built with. ``_ensure_entry_assumptions`` does
+    # the work, idempotently, so this step carries no statements.
+    5: (),
 }
 
 _DOCUMENT_COLUMNS = """
@@ -565,11 +581,33 @@ def _ensure_profile_postal_code(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE contributor_profiles ADD COLUMN codigo_postal TEXT")
 
 
+def _ensure_entry_assumptions(conn: sqlite3.Connection) -> None:
+    """Add `journal_entries.assumptions` to a schema-4 database (M3, §8:171).
+
+    The v4 step created the table; v5 adds a column to a table that already exists, so
+    this is the same guarded, additive ALTER shape M2 and M2-E used. No table, no-op;
+    column already present, no-op — which also covers the fresh database, whose table
+    step 4 just built with the column.
+
+    A pre-v5 row reads as ``'[]'``, and that is exactly true of it: no application
+    journal writer existed before v5 (``journal_entries`` has no repository and no
+    port), so no stored row lost an assumption, and ``[]`` is the domain's own value
+    for "presumed nothing" (``ProposedJournalEntry.assumptions``). Nothing is
+    backfilled or invented.
+    """
+    columns = _columns(conn, "journal_entries")
+    if columns and "assumptions" not in columns:
+        conn.execute(
+            "ALTER TABLE journal_entries ADD COLUMN assumptions TEXT NOT NULL DEFAULT '[]'"
+        )
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """Create/migrate the SQLite schema up to :data:`SCHEMA_VERSION` (§11).
 
     Authoritative entry point for the application: applies every missing
-    migration step in order (``CREATE TABLE IF NOT EXISTS`` only), then advances
+    migration step in order (``CREATE TABLE IF NOT EXISTS`` plus the guarded
+    additive ``ALTER``s the ladder cannot express as statements), then advances
     ``PRAGMA user_version``. Idempotent, and never drops, recreates or rewrites
     existing rows — including rows written by a pre-M2 database. A database
     already stamped with a *newer* version is left at that version (never lowered).
@@ -581,6 +619,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             conn.execute(statement)
     _ensure_run_link(conn)
     _ensure_profile_postal_code(conn)
+    _ensure_entry_assumptions(conn)
     if version < SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
