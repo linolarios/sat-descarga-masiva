@@ -79,3 +79,17 @@ class MappingNotConfigured(SatClientError):
 
 class InvalidMapping(SatClientError):
     """A mapping source does not describe a usable, versioned account mapping (§8a:207)."""
+
+
+class UnbalancedJournalCommit(SatClientError):
+    """A ``POSTED`` record does not balance: the commit is aborted, never downgraded (§8:158).
+
+    §8:158's ``Debe == Haber`` gate is checked twice, deliberately. The first check belongs to
+    the ``PostingEligibilityValidator``: an unbalanced *proposal* is ``UNBALANCED_ENTRY`` +
+    ``PROPOSED``, i.e. a review case. The second check is on the way to the ledger and is not a
+    review case at all: by then the entry says ``POSTED``, so a record that does not balance is a
+    *writer* bug, and a commit path that swallowed it would be the defect rather than the
+    safeguard. It aborts loudly rather than writing half a posting to nobody, and it never
+    rewrites the verdict, because a posting state is assigned once (§8:166): an unbalanced
+    ``POSTED`` entry is fixed by fixing the writer, not by demoting it to ``PROPOSED``.
+    """

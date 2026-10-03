@@ -223,6 +223,8 @@ class PostingEligibilityValidator:
         self,
         request: PostingContext,
         proposal: ProposedJournalEntry | Skip | ReviewRequest,
+        *,
+        mapping: AccountMapping | None = None,
     ) -> PostingDecision:
         """The verdict for this document's rule answer: `POSTED`, `SKIPPED` or `PROPOSED`.
 
@@ -232,13 +234,21 @@ class PostingEligibilityValidator:
         raises (`MappingNotConfigured`) rather than a per-document review case: it would fail
         identically for every document the client owns, so pretending otherwise would bury one
         fixable mistake under thousands of flags.
+
+        ``mapping`` lets a caller that has *already* resolved the client's chart hand that same
+        object in, so one document's decision is versioned by exactly one mapping and a run
+        pays for the YAML once (§8a:207). It is optional and keyword-only, and passing nothing
+        simply means this class does the resolving — either way the object the outcome names is
+        the one the port answered with, never a second read that could disagree.
         """
-        mapping = self._mapping.mapping_for(request.contributor_rfc)
+        resolved = (
+            mapping if mapping is not None else self._mapping.mapping_for(request.contributor_rfc)
+        )
         if isinstance(proposal, Skip):
-            return self._skip(proposal, mapping)
+            return self._skip(proposal, resolved)
         if isinstance(proposal, ReviewRequest):
-            return self._review(proposal, mapping)
-        return self._post(request, proposal, mapping)
+            return self._review(proposal, resolved)
+        return self._post(request, proposal, resolved)
 
     def _skip(self, skip: Skip, mapping: AccountMapping) -> PostingDecision:
         """§8:161: a skip is honoured — for an out-of-scope rule id, and only for one."""

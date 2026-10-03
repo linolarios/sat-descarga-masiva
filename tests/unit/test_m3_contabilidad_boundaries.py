@@ -21,23 +21,41 @@ scan — a guard that silently scans nothing must fail, not pass.
 The two checkers are behaviours in their own right, so they are unit-tested
 directly (forbidden import detected, sibling package detected, relative import
 resolved, float usage found but docstrings ignored) instead of being trusted.
+
+The same §4 dependency rule is checked one layer out, over ``application/``
+(A25): the application layer may depend on the *engine*, the domain and its own
+ports, but never on an adapter or a library. The engine's own guard cannot see
+that, because it only scans ``contabilidad/``.
 """
 
 import ast
 import sys
 from pathlib import Path
 
+from sat_descarga_masiva import application as application_package
 from sat_descarga_masiva import contabilidad as contabilidad_package
 from sat_descarga_masiva.application.ports import persistence as persistence_port
 
 _CONTABILIDAD_ROOT = Path(contabilidad_package.__file__ or "").parent
 _CONTABILIDAD_PREFIX = "sat_descarga_masiva.contabilidad"
+_APPLICATION_ROOT = Path(application_package.__file__ or "").parent
+_APPLICATION_PREFIX = "sat_descarga_masiva.application"
 
 #: What the engine may import: its own modules, plus domain and application (§4).
 _ALLOWED_ROOTS = (
     _CONTABILIDAD_PREFIX,
     "sat_descarga_masiva.domain",
     "sat_descarga_masiva.application",
+)
+
+#: What ``application/`` may import: itself, the domain, and the engine it orchestrates. The
+#: sibling ``fiscal/`` package is legitimate here (M2.8 composes it), which is exactly why the
+#: application allow-list is stated separately rather than reused.
+_APPLICATION_ALLOWED_ROOTS = (
+    _APPLICATION_PREFIX,
+    "sat_descarga_masiva.contabilidad",
+    "sat_descarga_masiva.domain",
+    "sat_descarga_masiva.fiscal",
 )
 
 #: §4/§8's named ban: the adapters and the XML/DB/spreadsheet/HTTP libraries.
@@ -69,10 +87,30 @@ def _package_sources() -> dict[str, str]:
     }
 
 
-def _imported_modules(source: str, *, filename: str = "<memory>") -> list[str]:
+def _application_sources() -> dict[str, str]:
+    """Every module in `application/`, keyed by its path relative to the package."""
+    return {
+        str(path.relative_to(_APPLICATION_ROOT)): path.read_text(encoding="utf-8")
+        for path in sorted(_APPLICATION_ROOT.rglob("*.py"))
+    }
+
+
+def _package_of(prefix: str, relative_path: str) -> str:
+    """The package a module at ``relative_path`` sits in, so relative imports resolve.
+
+    `use_cases/execute_accounting.py` is ``sat_descarga_masiva.application.use_cases``: a
+    relative import inside it must be judged against *that* package, not against the root.
+    """
+    parent = Path(relative_path).parent.as_posix()
+    return prefix if parent == "." else f"{prefix}.{parent.replace('/', '.')}"
+
+
+def _imported_modules(
+    source: str, *, filename: str = "<memory>", prefix: str = _CONTABILIDAD_PREFIX
+) -> list[str]:
     """Every module `source` imports, named the way the boundary sees it.
 
-    Relative imports are resolved against the package, so `from .journal import X`
+    Relative imports are resolved against `prefix`, so `from .journal import X`
     is `sat_descarga_masiva.contabilidad.journal` and `from . import roles` is
     `...contabilidad.roles`; intra-package imports are therefore judged by the same
     allow-list as everything else. A symbol taken from the root package is judged as
@@ -83,11 +121,11 @@ def _imported_modules(source: str, *, filename: str = "<memory>") -> list[str]:
     modules: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            if node.level:  # relative: this package
+            if node.level:  # relative: the package this module lives in
                 if node.module:
-                    modules.append(f"{_CONTABILIDAD_PREFIX}.{node.module}")
+                    modules.append(f"{prefix}.{node.module}")
                 else:
-                    modules.extend(f"{_CONTABILIDAD_PREFIX}.{alias.name}" for alias in node.names)
+                    modules.extend(f"{prefix}.{alias.name}" for alias in node.names)
             elif node.module == "sat_descarga_masiva":
                 modules.extend(f"sat_descarga_masiva.{alias.name}" for alias in node.names)
             elif node.module is not None:
@@ -97,10 +135,10 @@ def _imported_modules(source: str, *, filename: str = "<memory>") -> list[str]:
     return modules
 
 
-def _is_external(module: str) -> bool:
-    """True when `module` leaves the engine's world: not domain/application, not stdlib."""
+def _is_external(module: str, *, allowed_roots: tuple[str, ...] = _ALLOWED_ROOTS) -> bool:
+    """True when `module` leaves this package's world: not its allow-list, not stdlib."""
     if module.startswith("sat_descarga_masiva"):
-        return not module.startswith(_ALLOWED_ROOTS)
+        return not module.startswith(allowed_roots)
     return module.split(".", maxsplit=1)[0] not in sys.stdlib_module_names
 
 
@@ -109,9 +147,11 @@ def _forbidden_modules(modules: list[str]) -> list[str]:
     return [module for module in modules if module.startswith(_FORBIDDEN_ROOTS)]
 
 
-def _external_modules(modules: list[str]) -> list[str]:
+def _external_modules(
+    modules: list[str], *, allowed_roots: tuple[str, ...] = _ALLOWED_ROOTS
+) -> list[str]:
     """The allow-list side of §4: anything that is not domain, application or stdlib."""
-    return [module for module in modules if _is_external(module)]
+    return [module for module in modules if _is_external(module, allowed_roots=allowed_roots)]
 
 
 def _float_usages(source: str, *, filename: str = "<memory>") -> list[int]:
@@ -254,4 +294,99 @@ def test_the_journal_port_names_the_record_without_naming_an_adapter() -> None:
     assert "sat_descarga_masiva.contabilidad.journal" in modules  # the aggregate it stores
     assert not [
         module for module in modules if module.startswith("sat_descarga_masiva.infrastructure")
+    ]
+
+
+# --- A25: the same §4 rule, one layer out — the application package --------------------------
+
+
+def test_the_relative_import_checker_resolves_inside_a_subpackage() -> None:
+    """RED: a sub-package's relative import must name *its* package, or the guard is blind."""
+    modules = _imported_modules(
+        "from . import sibling\nfrom ..ports import accounting\n",
+        filename="use_cases/execute_accounting.py",
+        prefix=_package_of(_APPLICATION_PREFIX, "use_cases/execute_accounting.py"),
+    )
+    assert sorted(modules) == [
+        "sat_descarga_masiva.application.use_cases.ports",
+        "sat_descarga_masiva.application.use_cases.sibling",
+    ]
+    assert not _external_modules(modules, allowed_roots=_APPLICATION_ALLOWED_ROOTS)
+
+
+def test_the_package_locator_keeps_a_top_level_module_at_the_root() -> None:
+    """A module directly in `application/` has the package itself as its relative base."""
+    assert _package_of(_APPLICATION_PREFIX, "__init__.py") == _APPLICATION_PREFIX
+    assert (
+        _package_of(_APPLICATION_PREFIX, "ports/accounting.py")
+        == "sat_descarga_masiva.application.ports"
+    )
+
+
+def test_the_application_package_has_modules_to_guard() -> None:
+    """A guard that scans nothing must fail: the application layer is where the stages live."""
+    sources = _application_sources()
+    assert "__init__.py" in sources
+    assert "use_cases/execute_accounting.py" in sources  # the stage this guard exists for
+
+
+def test_a25_the_application_package_imports_no_adapter_or_library() -> None:
+    """A25 §4: the application layer orchestrates ports — it never reaches for an adapter."""
+    offenders = {
+        name: violations
+        for name, source in _application_sources().items()
+        if (
+            violations := _forbidden_modules(
+                _imported_modules(
+                    source, filename=name, prefix=_package_of(_APPLICATION_PREFIX, name)
+                )
+            )
+        )
+    }
+    assert not offenders
+
+
+def test_a25_the_application_package_stays_inside_its_own_allow_list() -> None:
+    """A25 §4: itself, the domain, the engine, the sibling `fiscal/` package — and stdlib."""
+    offenders = {
+        name: violations
+        for name, source in _application_sources().items()
+        if (
+            violations := _external_modules(
+                _imported_modules(
+                    source, filename=name, prefix=_package_of(_APPLICATION_PREFIX, name)
+                ),
+                allowed_roots=_APPLICATION_ALLOWED_ROOTS,
+            )
+        )
+    }
+    assert not offenders
+
+
+def test_a25_the_new_stage_depends_inward_only() -> None:
+    """A25: the stage that writes the ledger reads the engine and its ports, nothing more."""
+    source = _application_sources()["use_cases/execute_accounting.py"]
+    modules = _imported_modules(
+        source,
+        filename="use_cases/execute_accounting.py",
+        prefix=_package_of(_APPLICATION_PREFIX, "use_cases/execute_accounting.py"),
+    )
+    assert not _forbidden_modules(modules)
+    assert not _external_modules(modules, allowed_roots=_APPLICATION_ALLOWED_ROOTS)
+    assert sorted({module for module in modules if module.startswith("sat_descarga_masiva")}) == [
+        "sat_descarga_masiva.application.ports.accounting",
+        "sat_descarga_masiva.application.ports.persistence",
+        "sat_descarga_masiva.application.ports.services",
+        "sat_descarga_masiva.contabilidad.classification",
+        "sat_descarga_masiva.contabilidad.journal",
+        "sat_descarga_masiva.contabilidad.rules.contract",
+        "sat_descarga_masiva.contabilidad.rules.posting",
+        "sat_descarga_masiva.contabilidad.validator",
+        "sat_descarga_masiva.domain.enums.comprobante",
+        "sat_descarga_masiva.domain.errors",
+        "sat_descarga_masiva.domain.model.fiscal_document",
+        "sat_descarga_masiva.domain.model.perspective",
+        "sat_descarga_masiva.domain.model.review",
+        "sat_descarga_masiva.domain.model.value_objects",
+        "sat_descarga_masiva.fiscal.projection",
     ]
