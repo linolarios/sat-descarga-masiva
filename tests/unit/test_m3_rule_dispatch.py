@@ -17,7 +17,9 @@ from decimal import Decimal
 
 import pytest
 
+from sat_descarga_masiva.contabilidad.classification import Classification
 from sat_descarga_masiva.contabilidad.journal import AccountingAssumption, ProposedJournalEntry
+from sat_descarga_masiva.contabilidad.roles import AccountRole
 from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, ReviewRequest, Skip
 from sat_descarga_masiva.contabilidad.rules.posting import (
     POSTING_RULES,
@@ -75,12 +77,16 @@ def _document(
 
 
 def _context(
-    *, perspective: Perspective = Perspective.EMITIDO, **document: object
+    *,
+    perspective: Perspective = Perspective.EMITIDO,
+    classification: Classification | None = None,
+    **document: object,
 ) -> PostingContext:
     return PostingContext(
         contributor_rfc=CONTRIBUTOR,
         document=_document(**document),  # type: ignore[arg-type]
         perspective=perspective,
+        classification=classification,
     )
 
 
@@ -109,6 +115,50 @@ def test_a_ppd_document_is_ruled_by_4_2() -> None:
     assert isinstance(proposal, ProposedJournalEntry)
     assert proposal.rule_id == "4.2"
     assert proposal.assumptions == ()
+
+
+def test_a_received_pue_document_is_ruled_by_4_3() -> None:
+    """§8:181: a received PUE purchase books the classified base, creditable IVA and clearing."""
+    proposal = propose(
+        _context(
+            perspective=Perspective.RECIBIDO,
+            metodo_pago="PUE",
+            classification=AccountRole.GASTO,
+        )
+    )
+    assert isinstance(proposal, ProposedJournalEntry)
+    assert proposal.rule_id == "4.3"
+    assert proposal.assumptions == (AccountingAssumption.ASSUMED_PUE,)
+    assert AccountRole.GASTO in {line.account_role for line in proposal.lines}
+
+
+def test_a_received_ppd_document_is_ruled_by_4_4() -> None:
+    """§8:182: a received PPD purchase owes the vendor; nothing is presumed paid."""
+    proposal = propose(
+        _context(
+            perspective=Perspective.RECIBIDO,
+            metodo_pago="PPD",
+            classification=AccountRole.INVENTARIO,
+        )
+    )
+    assert isinstance(proposal, ProposedJournalEntry)
+    assert proposal.rule_id == "4.4"
+    assert proposal.assumptions == ()
+    assert AccountRole.PROVEEDORES in {line.account_role for line in proposal.lines}
+
+
+@pytest.mark.parametrize("metodo_pago", [None, "", "XYZ", "pue"])
+def test_an_undecidable_received_method_is_reviewed_never_guessed(metodo_pago: str | None) -> None:
+    """§8:171 applies to the received rows too: presuming PUE books a payment nobody stated."""
+    proposal = propose(
+        _context(
+            perspective=Perspective.RECIBIDO,
+            metodo_pago=metodo_pago,
+            classification=AccountRole.GASTO,
+        )
+    )
+    assert _flag_types(proposal) == [ReviewFlagType.MISSING_SOURCE_FIELD]
+    assert _refused(proposal).entry is None
 
 
 @pytest.mark.parametrize("metodo_pago", [None, "", "XYZ", "pue"])
@@ -146,7 +196,6 @@ def test_the_out_of_scope_table_is_the_only_way_to_a_skip(
         ("E", Perspective.RECIBIDO),
         ("P", Perspective.EMITIDO),
         ("P", Perspective.RECIBIDO),
-        ("I", Perspective.RECIBIDO),
         ("N", Perspective.EMITIDO),
         ("R", Perspective.EMITIDO),
         ("X", Perspective.EMITIDO),
@@ -166,9 +215,9 @@ def test_an_unbuilt_row_is_reviewed_and_never_silently_skipped(
 # --- the registry ----------------------------------------------------------------------
 
 
-def test_the_registry_holds_the_two_issued_income_rows() -> None:
-    """§8:175's I-EMITIDO rows, and the wiring the validator checks a rule against (§8:159)."""
-    assert {row.rule_id for row in POSTING_RULES} == {"4.1", "4.2"}
+def test_the_registry_holds_the_income_rows_for_both_sides() -> None:
+    """§8:175/181's I rows — EMITIDO 4.1/4.2 and RECIBIDO 4.3/4.4 — and the validator's wiring."""
+    assert {row.rule_id for row in POSTING_RULES} == {"4.1", "4.2", "4.3", "4.4"}
     assert {row.rule_id: row.rule_version for row in POSTING_RULES} == SUPPORTED_RULES
     assert {row.metodo_pago for row in POSTING_RULES} == {"PUE", "PPD"}
 

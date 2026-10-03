@@ -28,14 +28,21 @@ _CLIENT = Rfc("AAA010101AAA")
 _OTHER_CLIENT = Rfc("CCC010101CCC")
 _VERSION = "2026.01"
 
-#: The roles the emitter-side income rules (4.1/4.2) resolve; the fixture must cover them.
-_EMITTER_ROLES = frozenset(
+#: The roles the income rules resolve — emitter 4.1/4.2 and receiver 4.3/4.4; the fixture must
+#: cover them. (`gasto`/`inventario` are the classified purchase base, so both sides of an `I`
+#: comprobante resolve here.)
+_CLIENT_ROLES = frozenset(
     {
         AccountRole.INGRESOS,
         AccountRole.CLIENTES,
         AccountRole.CLEARING,
         AccountRole.IVA_TRASLADADO_COBRADO,
         AccountRole.IVA_TRASLADADO_NO_COBRADO,
+        AccountRole.GASTO,
+        AccountRole.INVENTARIO,
+        AccountRole.PROVEEDORES,
+        AccountRole.IVA_ACRED_PAGADO,
+        AccountRole.IVA_ACRED_PENDIENTE,
     }
 )
 
@@ -101,13 +108,13 @@ def test_the_fixture_mapping_loads_with_its_version_and_roles() -> None:
     mapping = _resolved(_provider(), _CLIENT)
     assert mapping.mapping_version == _VERSION
     assert mapping.resolve(AccountRole.INGRESOS) == "401-001"
-    assert mapping.unresolved(_EMITTER_ROLES) == ()
+    assert mapping.unresolved(_CLIENT_ROLES) == ()
 
 
 def test_the_fixture_names_the_roles_a_client_needs_and_nothing_invented() -> None:
     """A typo in the YAML would resolve to nothing: every key must be a real role."""
     mapping = _resolved(_provider(), _CLIENT)
-    assert set(mapping.accounts) == _EMITTER_ROLES
+    assert set(mapping.accounts) == _CLIENT_ROLES
 
 
 def test_a_client_without_a_mapping_file_is_a_configuration_failure(tmp_path: Path) -> None:

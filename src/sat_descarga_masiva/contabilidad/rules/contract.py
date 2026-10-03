@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sat_descarga_masiva.contabilidad.classification import Classification
 from sat_descarga_masiva.contabilidad.journal import ProposedJournalEntry
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument
 from sat_descarga_masiva.domain.model.perspective import Perspective
@@ -40,11 +41,19 @@ class PostingContext:
     folders, once EMITIDO and once RECIBIDO, in two different sets of books. The engine
     reads nothing else: no client aggregate, no repository, no clock, no cache. A rule is
     therefore a pure function of the source facts and is replayable from the ledger.
+
+    ``classification`` carries §8a:207's ``ClaveProdServ → AccountingCategory → AccountRole``
+    answer for a *received* document, resolved from the client's versioned mapping before the
+    rule runs (``AccountMapping.classify``). It is ``None`` for the emitter-side rules, which
+    need no product classification, and a `ClassificationRefusal` when the concepts do not
+    reduce to one role: the receiving rules consult it, so the role is never guessed inside a
+    rule and the mapping stays the one place a chart of accounts is decided.
     """
 
     contributor_rfc: Rfc
     document: FiscalDocument
     perspective: Perspective
+    classification: Classification | None = None
 
 
 @dataclass(frozen=True)

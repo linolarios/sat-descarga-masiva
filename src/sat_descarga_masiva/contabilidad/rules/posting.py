@@ -1,6 +1,7 @@
-"""Rules 4.1/4.2 — `I` EMITIDO, and the one door that selects between them (§8:179/180).
+"""Rules 4.1–4.4 — `I` comprobantes on both sides (§8:179/180/181/182), and the one door.
 
-§8's table gives an *issued* income comprobante two rows, one per payment method:
+§8's table gives an income comprobante four rows: two when it is *issued* (`EMITIDO`) and two
+when it is *received* (`RECIBIDO` — a purchase), one per payment method. The issued two first:
 
 - **4.1** (PUE): the SAT presumption is a single-exhibition payment, so the cash leg is booked
   to `CLEARING` and the entry says so — `ASSUMED_PUE` (§8:171). It is an *accounting
@@ -10,9 +11,20 @@
   promote to `SUPPORTED_BY_BANK` cannot redefine it.
 - **4.2** (PPD): nothing is presumed paid, so the receivable is booked to `CLIENTES`.
 
-Both compute the same base — §8:175/191 under M3's `discount_policy = net` (§8a:204): `base =
-SubTotal − Descuento` — and both take the IVA from the document's own `002` traslados
-(§8:179/180), one leg however many rates contribute to it.
+The received two are the mirror with the sides flipped — a purchase:
+
+- **4.3** (PUE): `DR Gasto/Inv=base · DR IVA Acred. Pagado=IVA · CR Clearing=Total`, `ASSUMED_PUE`;
+- **4.4** (PPD): `DR Gasto/Inv=base · DR IVA Pendiente=IVA · CR Proveedores=Total`.
+
+Which of `Gasto`/`Inventario` the base lands on is not in the document: it is the client's
+``ClaveProdServ → AccountingCategory → AccountRole`` classification (§8a:196/207), carried on the
+`PostingContext` as ``classification`` and resolved by `AccountMapping.classify` before the rule
+runs. A document that does not classify to one postable role — no ClaveProdServ, an unclassified
+product, capital goods, or concepts that disagree — is reviewed whole, never defaulted to Gasto.
+
+All four compute the same base — §8:175/191/181/182 under M3's `discount_policy = net` (§8a:204):
+`base = SubTotal − Descuento` — and take the IVA from the document's own `002` traslados, one leg
+however many rates contribute to it.
 
 A document whose shape is not that one gets no entry rather than a partial one. §8:173's
 preconditions are explicit here: an unbookable tax shape (retenciones, or a traslado of
@@ -27,11 +39,15 @@ posts unless `Total == base + IVA` holds, which is what makes the proposed entry
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
+from sat_descarga_masiva.contabilidad.classification import (
+    ClassificationRefusal,
+    ClassificationRefusalKind,
+)
 from sat_descarga_masiva.contabilidad.journal import (
     AccountingAssumption,
     JournalLine,
@@ -53,7 +69,7 @@ from sat_descarga_masiva.domain.policy.money import NormalizedAmount
 METODO_PUE = "PUE"
 METODO_PPD = "PPD"
 
-#: `c_Impuesto` for IVA — the only traslado these two rules book (§8:179/180).
+#: `c_Impuesto` for IVA — the only traslado these rules book (§8:179–182).
 IVA_IMPUESTO = "002"
 
 #: `c_TipoFactor`'s exempt value: an exempt traslado moves no amount, so it books no leg.
@@ -61,18 +77,34 @@ EXENTO = "Exento"
 
 RULE_4_1 = "4.1"
 RULE_4_2 = "4.2"
+RULE_4_3 = "4.3"
+RULE_4_4 = "4.4"
 
 #: Bumped only when the rule's *decision* changes: §8:194 keys the posting by it, so a historical
 #: entry stays explainable against the rule version that produced it.
 RULE_4_1_VERSION = "1"
 RULE_4_2_VERSION = "1"
+RULE_4_3_VERSION = "1"
+RULE_4_4_VERSION = "1"
 
-#: The legs' structural keys: §8:179/180 name one cash/receivable leg, one sold base and one
-#: IVA line, whatever the rates. §8:194 keys each leg by these, so they stay structural —
-#: `ASSUMED_PUE` is evidence about the entry (`AccountingAssumption`) and never appears here.
+#: The legs' structural keys: §8:179/180/181/182 name one money leg (the clearing account, a
+#: receivable or a payable), one base and one IVA line, whatever the rates. §8:194 keys each leg
+#: by these, so they stay structural — `ASSUMED_PUE` is evidence about the entry
+#: (`AccountingAssumption`) and never appears here.
 CLEARING_KEY = "clearing"
 BASE_KEY = "base"
 IVA_KEY = "iva"
+TOTAL_KEY = "total"
+
+#: Why a document that does not classify to one postable role is reviewed, as §8:167 flag types.
+#: The refusal's ``kind`` is the machine-readable bit, so this map is total over
+#: `ClassificationRefusalKind` and a reworded ``detail`` can never change a decision.
+_REFUSAL_FLAGS: Mapping[ClassificationRefusalKind, ReviewFlagType] = {
+    ClassificationRefusalKind.MISSING_CLAVE_PROD_SERV: ReviewFlagType.MISSING_SOURCE_FIELD,
+    ClassificationRefusalKind.UNCLASSIFIED_PRODUCT: ReviewFlagType.UNMAPPED_ACCOUNT,
+    ClassificationRefusalKind.CAPITAL_GOODS: ReviewFlagType.UNSUPPORTED_RULE,
+    ClassificationRefusalKind.MIXED_CATEGORIES: ReviewFlagType.UNSUPPORTED_RULE,
+}
 
 #: What a rule (and the selector below) may answer with (§8:173).
 Proposal = ProposedJournalEntry | Skip | ReviewRequest
@@ -94,12 +126,14 @@ def _flag(flag_type: ReviewFlagType, reason: str) -> ReviewFlag:
 class PostingRule:
     """One row of §8's table: the document shape it books, where the money lands, and how.
 
-    ``debit_role``/``debit_key`` are the leg the money is received into — `CLEARING` for a PUE
-    comprobante (§8:171) and `CLIENTES` for a PPD one (§8:180) — and ``iva_role`` is the IVA
-    line's role, which follows the same distinction (`IVA_TRASLADADO_COBRADO` vs
-    `IVA_TRASLADADO_NO_COBRADO`). ``debit_key`` is structural (§8:194) and ``assumptions`` is
-    the row's evidence (§8:171): a PUE row states `ASSUMED_PUE` on the entry, a PPD row states
-    nothing, and neither puts an assumption into a leg's key.
+    ``money_role``/``money_key`` are the leg the money moves on — `CLEARING` for a PUE comprobante
+    (§8:171/181) or `CLIENTES`/`PROVEEDORES` for a PPD one (§8:180/182) — and its *side* is the
+    row's direction: a debit when the comprobante is issued (money in), a credit when it is
+    received (money out). ``iva_role`` is the IVA line's role and follows the same two
+    distinctions (traslado cobrado/no cobrado on the issued side, acreditable pagado/pendiente on
+    the received side). ``money_key`` is structural (§8:194); ``assumptions`` is the row's
+    evidence (§8:171): a PUE row states `ASSUMED_PUE` on the entry, a PPD row states nothing, and
+    neither puts an assumption into a leg's key.
     """
 
     rule_id: str
@@ -107,8 +141,8 @@ class PostingRule:
     tipo: TipoComprobante
     perspective: Perspective
     metodo_pago: str
-    debit_role: AccountRole
-    debit_key: str
+    money_role: AccountRole
+    money_key: str
     iva_role: AccountRole
     propose: Callable[[PostingContext], Proposal]
     assumptions: tuple[AccountingAssumption, ...] = ()
@@ -124,8 +158,8 @@ class PostingRule:
 
 
 @dataclass(frozen=True)
-class _IncomeAmounts:
-    """The three amounts §8:175/179/180 book, once the document is proven to carry them.
+class _BaseAmounts:
+    """The three amounts §8:175/179/180/181/182 book, once the document is proven to carry them.
 
     ``source_uuid``/``entry_date`` travel with them because they are what the posting is keyed
     and dated by (§8:194, §8a:209): proving they exist is part of the same precondition check,
@@ -149,6 +183,16 @@ def rule_4_2(request: PostingContext) -> ProposedJournalEntry | ReviewRequest:
     return _issued_income(request, _RULE_4_2)
 
 
+def rule_4_3(request: PostingContext) -> ProposedJournalEntry | ReviewRequest:
+    """§8:181 — a received PUE purchase: the classified base and creditable IVA are debits."""
+    return _received_purchase(request, _RULE_4_3)
+
+
+def rule_4_4(request: PostingContext) -> ProposedJournalEntry | ReviewRequest:
+    """§8:182 — a received PPD purchase: nothing is presumed paid, the vendor is owed."""
+    return _received_purchase(request, _RULE_4_4)
+
+
 def _issued_income(
     request: PostingContext, row: PostingRule
 ) -> ProposedJournalEntry | ReviewRequest:
@@ -168,13 +212,66 @@ def _issued_income(
             ),
             detail="the document is not the row this rule books, so the rule computed nothing",
         )
-    amounts = _income_amounts(request, row)
+    amounts = _base_amounts(request, row)
     if isinstance(amounts, ReviewRequest):
         return amounts
-    return _entry(request, row, amounts)
+    return _issued_entry(request, row, amounts)
 
 
-def _income_amounts(request: PostingContext, row: PostingRule) -> _IncomeAmounts | ReviewRequest:
+def _received_purchase(
+    request: PostingContext, row: PostingRule
+) -> ProposedJournalEntry | ReviewRequest:
+    """§8:181/182's calculation: the shape, then the classification, then the preconditions.
+
+    The row decides the money and IVA roles; the *classification* (§8a:196/207) decides the base
+    role, and a document that does not classify to one postable role is reviewed whole. The
+    classification is checked before the amounts so the refusal names the purchase's own
+    precondition first — a received comprobante whose products are unclassified is not a purchase
+    this engine can book, whatever its arithmetic says.
+    """
+    if not row.claims(request):
+        document = request.document
+        return _review(
+            request,
+            row,
+            flags=(
+                _flag(
+                    ReviewFlagType.UNSUPPORTED_RULE,
+                    f"rule {row.rule_id} books {row.tipo.value} {row.perspective.value}"
+                    f" {row.metodo_pago}; this document is {document.tipo!r}"
+                    f" {request.perspective.value} {document.metodo_pago!r}",
+                ),
+            ),
+            detail="the document is not the row this rule books, so the rule computed nothing",
+        )
+    classification = request.classification
+    if classification is None:
+        return _review(
+            request,
+            row,
+            flags=(
+                _flag(
+                    ReviewFlagType.MISSING_SOURCE_FIELD,
+                    "no classification was resolved for this received purchase: §8a:207's"
+                    " ClaveProdServ → AccountingCategory → AccountRole answer is a precondition",
+                ),
+            ),
+            detail=_PRECONDITION_DETAIL,
+        )
+    if isinstance(classification, ClassificationRefusal):
+        return _review(
+            request,
+            row,
+            flags=(_flag(_REFUSAL_FLAGS[classification.kind], classification.detail),),
+            detail=_PRECONDITION_DETAIL,
+        )
+    amounts = _base_amounts(request, row)
+    if isinstance(amounts, ReviewRequest):
+        return amounts
+    return _purchase_entry(request, row, amounts, classification)
+
+
+def _base_amounts(request: PostingContext, row: PostingRule) -> _BaseAmounts | ReviewRequest:
     """§8:173's preconditions: what `base`, `IVA` and `Total` come from, or why they cannot.
 
     ``row`` is only carried so a refusal can be keyed by the rule that made it.
@@ -217,13 +314,13 @@ def _income_amounts(request: PostingContext, row: PostingRule) -> _IncomeAmounts
     if refusals:
         return _review(request, row, flags=refusals, detail=_PRECONDITION_DETAIL)
 
-    return _IncomeAmounts(
+    return _BaseAmounts(
         source_uuid=source_uuid, entry_date=entry_date, base=base, iva=iva, total=total
     )
 
 
-def _entry(
-    request: PostingContext, row: PostingRule, amounts: _IncomeAmounts
+def _issued_entry(
+    request: PostingContext, row: PostingRule, amounts: _BaseAmounts
 ) -> ProposedJournalEntry:
     """§8:179/180's legs: the money lands on the row's account, base and IVA are the credits.
 
@@ -234,8 +331,8 @@ def _entry(
     """
     lines = [
         JournalLine(
-            account_role=row.debit_role,
-            line_key=row.debit_key,
+            account_role=row.money_role,
+            line_key=row.money_key,
             side=LineSide.DEBE,
             amount=amounts.total,
         ),
@@ -255,6 +352,53 @@ def _entry(
                 amount=amounts.iva,
             )
         )
+    return ProposedJournalEntry(
+        rule_id=row.rule_id,
+        rule_version=row.rule_version,
+        contributor_rfc=request.contributor_rfc,
+        source_uuid=amounts.source_uuid,
+        source_hash=request.document.source_hash,
+        entry_date=amounts.entry_date,
+        lines=tuple(lines),
+        assumptions=row.assumptions,
+    )
+
+
+def _purchase_entry(
+    request: PostingContext, row: PostingRule, amounts: _BaseAmounts, base_role: AccountRole
+) -> ProposedJournalEntry:
+    """§8:181/182's legs: the classified base and the creditable IVA debit; the money credits.
+
+    The mirror of :func:`_issued_entry`, balancing by the same proof: `Total == base + IVA` was
+    checked in `_base_amounts`, so the debits equal the money credit. ``base_role`` is the
+    client's classification of the document's products (§8a:207) — `Gasto` or `Inventario`, never
+    guessed — and the row's ``assumptions`` travel on the entry (§8:171).
+    """
+    lines = [
+        JournalLine(
+            account_role=base_role,
+            line_key=BASE_KEY,
+            side=LineSide.DEBE,
+            amount=amounts.base,
+        )
+    ]
+    if amounts.iva.amount > 0:
+        lines.append(
+            JournalLine(
+                account_role=row.iva_role,
+                line_key=IVA_KEY,
+                side=LineSide.DEBE,
+                amount=amounts.iva,
+            )
+        )
+    lines.append(
+        JournalLine(
+            account_role=row.money_role,
+            line_key=row.money_key,
+            side=LineSide.HABER,
+            amount=amounts.total,
+        )
+    )
     return ProposedJournalEntry(
         rule_id=row.rule_id,
         rule_version=row.rule_version,
@@ -334,7 +478,7 @@ def _net_base(document: FiscalDocument) -> NormalizedAmount | None:
 
 
 def _iva_traslado(document: FiscalDocument, flags: list[ReviewFlag]) -> NormalizedAmount:
-    """The document's own IVA traslados, summed into the one leg §8:179/180 names.
+    """The document's own IVA traslados, summed into the one leg §8:179/180/181/182 names.
 
     An exempt traslado moves nothing and contributes nothing. A traslado that carries a rate but
     no `Importe` is a source the rule cannot compute from, so it appends its reason to ``flags``
@@ -381,7 +525,7 @@ def _amount_refusals(
         )
     # The base and the total must move something — a comprobante that sells nothing is not a
     # posting. IVA may legitimately be zero: an exempt document has no tax to book, so it gets
-    # no IVA leg at all (§8:179) rather than a zero leg, which is not a leg.
+    # no IVA leg at all (§8:179/181) rather than a zero leg, which is not a leg.
     if base.amount <= 0 or total.amount <= 0 or iva.amount < 0:
         return (
             _flag(
@@ -402,7 +546,7 @@ def _amount_refusals(
 
 
 def _unbookable_tax(document: FiscalDocument) -> ReviewFlag | None:
-    """The one tax shape these rules book: IVA traslados and nothing else (§8:179/180).
+    """The one tax shape these rules book: IVA traslados and nothing else (§8:179–182).
 
     Retenciones and every other impuesto are *not* silently dropped — dropping them would
     produce an entry that does not state what the document says — so the document is reviewed
@@ -411,7 +555,7 @@ def _unbookable_tax(document: FiscalDocument) -> ReviewFlag | None:
     if document.impuestos.retenciones:
         return _flag(
             ReviewFlagType.UNSUPPORTED_RULE,
-            "the document carries retenciones, which §8:179/180's entry does not book",
+            "the document carries retenciones, which §8:179–182's entries do not book",
         )
     others = sorted(
         {
@@ -423,7 +567,7 @@ def _unbookable_tax(document: FiscalDocument) -> ReviewFlag | None:
     if others:
         return _flag(
             ReviewFlagType.UNSUPPORTED_RULE,
-            f"the document carries traslados of impuesto {', '.join(others)}: §8:179/180 book"
+            f"the document carries traslados of impuesto {', '.join(others)}: §8:179–182 book"
             " IVA only, and a partial entry would misstate the document",
         )
     return None
@@ -439,8 +583,8 @@ _RULE_4_1 = PostingRule(
     tipo=TipoComprobante.INGRESO,
     perspective=Perspective.EMITIDO,
     metodo_pago=METODO_PUE,
-    debit_role=AccountRole.CLEARING,
-    debit_key=CLEARING_KEY,
+    money_role=AccountRole.CLEARING,
+    money_key=CLEARING_KEY,
     iva_role=AccountRole.IVA_TRASLADADO_COBRADO,
     propose=rule_4_1,
     assumptions=(AccountingAssumption.ASSUMED_PUE,),
@@ -452,13 +596,38 @@ _RULE_4_2 = PostingRule(
     tipo=TipoComprobante.INGRESO,
     perspective=Perspective.EMITIDO,
     metodo_pago=METODO_PPD,
-    debit_role=AccountRole.CLIENTES,
-    debit_key="total",
+    money_role=AccountRole.CLIENTES,
+    money_key=TOTAL_KEY,
     iva_role=AccountRole.IVA_TRASLADADO_NO_COBRADO,
     propose=rule_4_2,
 )
 
-POSTING_RULES: tuple[PostingRule, ...] = (_RULE_4_1, _RULE_4_2)
+_RULE_4_3 = PostingRule(
+    rule_id=RULE_4_3,
+    rule_version=RULE_4_3_VERSION,
+    tipo=TipoComprobante.INGRESO,
+    perspective=Perspective.RECIBIDO,
+    metodo_pago=METODO_PUE,
+    money_role=AccountRole.CLEARING,
+    money_key=CLEARING_KEY,
+    iva_role=AccountRole.IVA_ACRED_PAGADO,
+    propose=rule_4_3,
+    assumptions=(AccountingAssumption.ASSUMED_PUE,),
+)
+
+_RULE_4_4 = PostingRule(
+    rule_id=RULE_4_4,
+    rule_version=RULE_4_4_VERSION,
+    tipo=TipoComprobante.INGRESO,
+    perspective=Perspective.RECIBIDO,
+    metodo_pago=METODO_PPD,
+    money_role=AccountRole.PROVEEDORES,
+    money_key=TOTAL_KEY,
+    iva_role=AccountRole.IVA_ACRED_PENDIENTE,
+    propose=rule_4_4,
+)
+
+POSTING_RULES: tuple[PostingRule, ...] = (_RULE_4_1, _RULE_4_2, _RULE_4_3, _RULE_4_4)
 
 #: The engine's registry as the validator is wired with it: ``rule_id`` → current version.
 SUPPORTED_RULES: dict[str, str] = {row.rule_id: row.rule_version for row in POSTING_RULES}
@@ -480,17 +649,22 @@ def propose(request: PostingContext) -> Proposal:
         if row.claims(request):
             return row.propose(request)
     document = request.document
-    if (
-        TipoComprobante.of(document.tipo) is TipoComprobante.INGRESO
-        and request.perspective is Perspective.EMITIDO
+    if TipoComprobante.of(document.tipo) is TipoComprobante.INGRESO and request.perspective in (
+        Perspective.EMITIDO,
+        Perspective.RECIBIDO,
     ):
+        pair = (
+            "4.1 (PUE) and 4.2 (PPD)"
+            if request.perspective is Perspective.EMITIDO
+            else "4.3 (PUE) and 4.4 (PPD)"
+        )
         return ReviewRequest(
             flags=(
                 _flag(
                     ReviewFlagType.MISSING_SOURCE_FIELD,
-                    f"MetodoPago {document.metodo_pago!r}: §8:179/180 choose between 4.1 (PUE)"
-                    " and 4.2 (PPD) by it, and presuming PUE would book a payment the document"
-                    " does not state (§8:171)",
+                    f"MetodoPago {document.metodo_pago!r}: §8:179–182 choose between {pair} by"
+                    " it, and presuming PUE would book a payment the document does not state"
+                    " (§8:171)",
                 ),
             ),
             detail="the payment method is absent or unknown, so neither row of §8's table applies",

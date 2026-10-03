@@ -107,12 +107,18 @@ def test_the_context_is_frozen() -> None:
         context.perspective = Perspective.RECIBIDO  # type: ignore[misc]
 
 
-def test_the_context_is_exactly_the_books_the_document_and_the_perspective() -> None:
-    """The closed input set (§8:194): no clock, no repository, no client aggregate."""
+def test_the_context_is_exactly_the_books_the_document_the_perspective_and_classification() -> None:
+    """The closed input set (§8:194/§8a:207): no clock, no repository, no client aggregate.
+
+    ``classification`` is the one *derived* carrier — §8a:207's resolved
+    ``ClaveProdServ → category → role`` answer, resolved before the rule runs — so the
+    receiving rules still read nothing but their context.
+    """
     assert [field.name for field in fields(PostingContext)] == [
         "contributor_rfc",
         "document",
         "perspective",
+        "classification",
     ]
 
 

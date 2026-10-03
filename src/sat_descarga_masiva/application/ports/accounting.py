@@ -17,15 +17,29 @@ One mapping per managed client (``mapping_for(contributor_rfc)``): the same role
 a different chart for a different client. The *file layout* of the YAML — including the
 deferred two-layer composition of catalog defaults with per-client overrides — is the
 adapter's business; this port owns only the question.
+
+The mapping answers a second question (§8a:207's ``ClaveProdServ → AccountingCategory``
+edge): a *received* purchase has no role in the document, so the client's chart says which
+role its products classify to. `AccountMapping.category_for` reads that table and
+`AccountMapping.classify` reduces a document's concepts to one role — or to a
+`ClassificationRefusal` — via `contabilidad.classification.classify_document`. Like the
+account table, the classification table is versioned by `mapping_version`; there is no
+second version scheme.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
+from sat_descarga_masiva.contabilidad.classification import (
+    AccountingCategory,
+    Classification,
+    classify_document,
+)
 from sat_descarga_masiva.contabilidad.roles import AccountRole
+from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument
 from sat_descarga_masiva.domain.model.value_objects import Rfc
 
 
@@ -41,6 +55,10 @@ class AccountMapping:
 
     mapping_version: str
     accounts: Mapping[AccountRole, str]
+    #: §8a:207's ``ClaveProdServ → AccountingCategory`` table, versioned with the mapping. An
+    #: absent entry classifies nothing — the ``UNMAPPED_ACCOUNT``-style review case, never a
+    #: default. Empty is legitimate: a client that books no received purchases has none.
+    classification: Mapping[str, AccountingCategory] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.mapping_version.strip():
@@ -67,6 +85,22 @@ class AccountMapping:
         reads lists the legs in the order the rule proposed them.
         """
         return tuple(dict.fromkeys(role for role in roles if self.resolve(role) is None))
+
+    def category_for(self, clave_prod_serv: str) -> AccountingCategory | None:
+        """The category this client classifies ``clave_prod_serv`` as, or ``None``.
+
+        ``None`` is the whole vocabulary for "unclassified" — like :meth:`resolve`, §8a:207
+        forbids a default, so the caller routes it to review instead of guessing Gasto.
+        """
+        return self.classification.get(clave_prod_serv.strip())
+
+    def classify(self, document: FiscalDocument) -> Classification:
+        """Reduce ``document``'s concepts to one postable role, or explain why it is not one.
+
+        The classification is this client's (§8a:207) and this version's, so it is resolved
+        here rather than inside a rule: a rule reads the answer off its `PostingContext`.
+        """
+        return classify_document(document, self.classification)
 
 
 class MappingProvider(Protocol):

@@ -1,10 +1,11 @@
 # Minimal chart of accounts for one test client (§8a:207).
 #
 # The file is named after the managed client's RFC: the provider resolves
-# `<root>/<RFC>.yaml`, so a client's mapping is an explicit, versioned artifact. Only the
-# roles the emitter-side income rules (4.1/4.2) resolve are listed — every other role is
-# deliberately absent, which is the UNMAPPED_ACCOUNT case the validator flags rather than
-# defaulting to an account.
+# `<root>/<RFC>.yaml`, so a client's mapping is an explicit, versioned artifact. The roles listed
+# are the ones the income rules resolve — emitter 4.1/4.2 and receiver 4.3/4.4 — plus the
+# `ClaveProdServ → AccountingCategory` table those receiver rules classify a purchase by. Every
+# other role is deliberately absent, which is the UNMAPPED_ACCOUNT case the validator flags
+# rather than defaulting to an account.
 mapping_version: "2026.01"
 
 accounts:
@@ -13,3 +14,16 @@ accounts:
   clearing: "102-099"
   iva_trasladado_cobrado: "208-001"
   iva_trasladado_no_cobrado: "209-001"
+  gasto: "601-001"
+  inventario: "115-001"
+  proveedores: "201-001"
+  iva_acred_pagado: "118-001"
+  iva_acred_pendiente: "119-001"
+
+# §8a:207's ClaveProdServ -> AccountingCategory table for this client. A *received* purchase
+# carries no role, so these entries are what rules 4.3/4.4 classify it by: the base leg goes to
+# the Gasto or Inventario role, and an activo_fijo product is reviewed (capital goods, §8a:196).
+classification:
+  "84111506": gasto
+  "53131600": inventario
+  "43211500": activo_fijo
