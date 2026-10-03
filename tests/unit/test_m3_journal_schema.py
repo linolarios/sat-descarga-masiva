@@ -59,41 +59,6 @@ _INSERT_SNAPSHOT = (
     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
-#: `journal_entries` exactly as ladder step 4 left it (schema 4): every column of the v4
-#: table and none of v5, plus the two append-only guards that step also created — so the
-#: upgrade under test is a *guarded* v4 table gaining a column, which is what a real v4
-#: database is. Verbatim from `sqlite.py`'s step-4 DDL and `_append_only_guards`.
-_PRE_V5_JOURNAL_ENTRIES = """
-CREATE TABLE journal_entries (
-    entry_key TEXT PRIMARY KEY,
-    contributor_rfc TEXT NOT NULL,
-    source_uuid TEXT NOT NULL,
-    source_hash TEXT NOT NULL,
-    rule_id TEXT NOT NULL,
-    rule_version TEXT NOT NULL,
-    mapping_version TEXT NOT NULL,
-    posting_state TEXT NOT NULL,
-    entry_date TEXT NOT NULL,
-    recorded_at TEXT NOT NULL
-)
-"""
-_PRE_V5_GUARDS = (
-    """
-CREATE TRIGGER journal_entries_no_update
-BEFORE UPDATE ON journal_entries
-BEGIN
-    SELECT RAISE(ABORT, 'journal_entries is append-only: a fact is written once (§8)');
-END
-""",
-    """
-CREATE TRIGGER journal_entries_no_delete
-BEFORE DELETE ON journal_entries
-BEGIN
-    SELECT RAISE(ABORT, 'journal_entries is append-only: a fact is never erased (§8)');
-END
-""",
-)
-
 #: One seed per table, plus the in-place edit that table must refuse. The edit is the
 #: smallest write that would make the row a lie: a state rewritten (§8:166), a leg
 #: silently re-amounted, an observation overwritten (§6), evidence replaced.
@@ -153,12 +118,21 @@ def _seed_snapshot(conn: sqlite3.Connection, entry_key: str) -> None:
 
 
 def _v4_database() -> sqlite3.Connection:
-    """A database as M3 (schema 4) left it: one entry row, no `assumptions` column."""
+    """A database as M3 (schema 4) left it: every table and guard, no `assumptions`.
+
+    Step 4 created `journal_entries` without the v5 column, so a real v4 database is the
+    current schema minus that one column — built by dropping it from the real DDL rather
+    than by restating step 4's `CREATE TABLE` in a fixture. A restated DDL cannot be
+    checked against anything and drifts the moment step 4 changes; a *partial* one also
+    lies about the other three M3 tables, which the ladder never re-creates for a v4
+    database (step 4 has already run, so only step 5 runs). `assumptions` is neither
+    key, index, nor referenced by a guard, so the drop leaves exactly what step 4's
+    `CREATE TABLE` left behind, column for column.
+    """
     conn = sqlite3.connect(":memory:")
-    conn.execute(_PRE_V5_JOURNAL_ENTRIES)
-    for guard in _PRE_V5_GUARDS:
-        conn.execute(guard)
+    init_schema(conn)
     _seed_entry(conn, "entry-1")
+    conn.execute("ALTER TABLE journal_entries DROP COLUMN assumptions")
     conn.execute("PRAGMA user_version = 4")
     conn.commit()
     return conn
@@ -176,7 +150,7 @@ def _columns(conn: sqlite3.Connection, table: str) -> dict[str, str]:
     return {row[1]: row[2].upper() for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
-def _column(conn: sqlite3.Connection, table: str, column: str) -> dict[str, object]:
+def _column_spec(conn: sqlite3.Connection, table: str, column: str) -> dict[str, object]:
     """One `PRAGMA table_info` row, so the DDL *contract* is assertable, not just the type."""
     for row in conn.execute(f"PRAGMA table_info({table})"):
         if row[1] == column:
@@ -229,7 +203,7 @@ def test_the_ladder_adds_the_assumption_column_as_the_v5_step() -> None:
     ambiguously: `[]` and only `[]` is the value meaning "presumed nothing".
     """
     conn = _conn()
-    assert _column(conn, "journal_entries", "assumptions") == {
+    assert _column_spec(conn, "journal_entries", "assumptions") == {
         "type": "TEXT",
         "notnull": 1,
         "default": "'[]'",
@@ -273,23 +247,47 @@ def test_a_v4_database_upgrades_and_keeps_its_rows() -> None:
     `[]` is not a placeholder for "unknown". No application journal writer existed
     before v5 — `journal_entries` has no repository and no port — so no stored row can
     have lost an assumption, and `[]` is the domain's own value for "presumed
-    nothing". Nothing is backfilled; the guard also leaves the v4 guards alone.
+    nothing". Nothing is backfilled, and the v4 guards are left exactly as they were.
     """
     conn = _v4_database()
     assert _user_version(conn) == 4
     assert "assumptions" not in _columns(conn, "journal_entries")
+    assert _table_names(conn) >= set(M3_TABLES)  # a v4 database has all four M3 tables
+    guards = _trigger_names(conn)
+    assert len(guards) == 8  # and both append-only guards on every one of them
 
     init_schema(conn)
 
     assert _user_version(conn) == SCHEMA_VERSION == 5
-    assert _column(conn, "journal_entries", "assumptions")["default"] == "'[]'"
-    assert _trigger_names(conn) == {"journal_entries_no_update", "journal_entries_no_delete"}
+    assert _column_spec(conn, "journal_entries", "assumptions")["default"] == "'[]'"
+    assert _trigger_names(conn) == guards  # the v4 guards are left exactly as they were
     row = conn.execute(
         "SELECT entry_key, posting_state, assumptions FROM journal_entries"
     ).fetchone()
     assert tuple(row) == ("entry-1", PostingState.POSTED.value, "[]")
     init_schema(conn)  # idempotent on an already-migrated v5 database
     assert _user_version(conn) == 5
+
+
+def test_a_v4_upgrade_lands_on_the_same_schema_a_fresh_database_gets() -> None:
+    """The `ALTER` reproduces the `CREATE` exactly, not merely the column (§8:161).
+
+    A fresh database gets `assumptions` from the table's `CREATE`, a v4 database from
+    the guarded `ALTER`; afterwards the two must be indistinguishable, or a fresh
+    install and an upgrade would carry different contracts for the same row. Comparing
+    `PRAGMA table_info` row for row pins position, type, nullability and default at
+    once, for every M3 table — not only the one the step touches.
+    """
+    upgraded = _v4_database()
+    init_schema(upgraded)
+    fresh = _conn()
+
+    assert _user_version(upgraded) == _user_version(fresh) == SCHEMA_VERSION == 5
+    for table in M3_TABLES:
+        assert list(upgraded.execute(f"PRAGMA table_info({table})")) == list(
+            fresh.execute(f"PRAGMA table_info({table})")
+        ), table
+    assert _trigger_names(upgraded) == _trigger_names(fresh)
 
 
 # --- immutability -------------------------------------------------------------------
@@ -450,7 +448,7 @@ def test_assumptions_is_entry_metadata_not_a_key_column() -> None:
     that the column is neither part of the key nor optional.
     """
     conn = _conn()
-    column = _column(conn, "journal_entries", "assumptions")
+    column = _column_spec(conn, "journal_entries", "assumptions")
     assert (column["pk"], column["notnull"]) == (0, 1)
     keys = [row[1] for row in conn.execute("PRAGMA table_info(journal_entries)") if row[5]]
     assert keys == ["entry_key"]
