@@ -18,7 +18,7 @@ unresolved role is never quietly defaulted (§8a:207).
 """
 
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -53,6 +53,8 @@ RECEPTOR = Rfc("BBB010101BBB")
 UUID = Uuid("4e80345d-917f-40bb-a98f-4a73939353c5")
 SOURCE_HASH = "a" * 64
 FECHA = date(2026, 1, 15)
+#: When a decision is written down: §8:166's record carries the moment it became durable.
+WHEN = datetime(2026, 2, 1, 9, 30, tzinfo=UTC)
 MAPPING_VERSION = "2026.01"
 RULE_ID = "4.1"
 RULE_VERSION = "1"
@@ -499,3 +501,82 @@ def test_a_decision_records_the_versions_it_was_made_under(field: str) -> None:
             mapping_version=" " if field == "mapping_version" else MAPPING_VERSION,
             policy_version=" " if field == "policy_version" else POLICY_VERSION,
         )
+
+
+# --- the decision written down: `to_record` (§8:166) -----------------------------------
+
+
+def test_a_posted_decision_becomes_the_record_a_store_writes() -> None:
+    """§8:194/§8:159/§8a:207: the key, the versions and every resolved account travel with it.
+
+    The record is the decision *projected*, not re-derived: `entry_key` is the entry's own
+    fingerprint under the decision's mapping version, and each leg carries the account this
+    decision resolved — which is what makes the posting explainable without the mapping.
+    """
+    decision = _validator().decide(_context(), _proposal())
+    record = decision.to_record(recorded_at=WHEN)
+
+    assert decision.entry is not None
+    assert record.entry_key == decision.entry.fingerprint(MAPPING_VERSION).canonical()
+    assert (record.contributor_rfc, record.source_uuid) == (CONTRIBUTOR, UUID)
+    assert (record.rule_id, record.rule_version) == (RULE_ID, RULE_VERSION)
+    assert (record.mapping_version, record.policy_version) == (MAPPING_VERSION, POLICY_VERSION)
+    assert record.posting_state is PostingState.POSTED
+    assert record.entry_date == FECHA
+    assert record.recorded_at == WHEN
+    assert record.assumptions == ()
+    assert [(line.line_key, line.ordinal) for line in record.lines] == [
+        ("total", 0),
+        ("base", 1),
+        ("iva", 2),
+    ]
+    assert [line.resolved_account for line in record.lines] == ["102-099", "401-001", "208-001"]
+
+
+def test_a_skipped_decision_becomes_a_zero_line_record() -> None:
+    """§8:169: the skip is an auditable record — dated, identified, versioned, legless."""
+    skip = Skip(entry=_proposal(lines=(), rule_id="4.12"), detail="tipo T carries no operation")
+    record = _validator().decide(_context(), skip).to_record(recorded_at=WHEN)
+
+    assert record.posting_state is PostingState.SKIPPED
+    assert record.lines == ()
+    assert record.entry_key == skip.entry.fingerprint(MAPPING_VERSION).canonical()
+
+
+def test_a_proposed_refusal_records_the_leg_it_could_not_resolve() -> None:
+    """§8:167/§8a:207: the unmapped role is recorded as ``None`` — the refusal is evidence.
+
+    Nothing may be posted for a role the chart does not name, so the record keeps the leg
+    with no account: a reader sees *which* leg a human still has to resolve.
+    """
+    provider = _Provider(AccountMapping(MAPPING_VERSION, {}))
+    decision = _validator(provider).decide(_context(), _proposal())
+    record = decision.to_record(recorded_at=WHEN)
+
+    assert decision.posting_state is PostingState.PROPOSED
+    assert [line.resolved_account for line in record.lines] == [None, None, None]
+
+
+def test_a_decision_that_names_no_entry_cannot_become_a_record() -> None:
+    """§8:167: an undatable/unidentified document has no §8:194 identity to append under.
+
+    The review fact belongs to the document (an M2 review flag), so there is nothing to
+    record here — and inventing a fingerprint for it is what §8:194 forbids.
+    """
+    review = ReviewRequest(
+        flags=(ReviewFlag(ReviewFlagType.MISSING_POSTING_IDENTITY, "no TFD UUID"),),
+        detail="the document carries no identity to key an entry by",
+    )
+    decision = _validator().decide(_context(), review)
+
+    with pytest.raises(ValueError, match="nothing to record"):
+        decision.to_record(recorded_at=WHEN)
+
+
+def test_an_entry_without_a_source_uuid_cannot_become_a_record() -> None:
+    """§8:194: no source UUID, no fingerprint — and therefore nothing to append under."""
+    decision = _validator().decide(_context(), _proposal(source_uuid=None))
+    assert decision.entry is not None  # the entry exists, it simply cannot be keyed
+
+    with pytest.raises(ValueError, match="no fingerprint"):
+        decision.to_record(recorded_at=WHEN)

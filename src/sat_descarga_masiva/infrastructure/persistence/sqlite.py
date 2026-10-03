@@ -24,6 +24,15 @@ import sqlite3
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
+from sat_descarga_masiva.contabilidad.journal import (
+    JournalEntryRecord,
+    JournalLineRecord,
+    LineSide,
+    PostingState,
+    decode_assumptions,
+    encode_assumptions,
+)
+from sat_descarga_masiva.contabilidad.roles import AccountRole
 from sat_descarga_masiva.domain.enums.catalog import Direction, ServiceType
 from sat_descarga_masiva.domain.errors import (
     ImmutableRecordConflict,
@@ -58,8 +67,9 @@ from sat_descarga_masiva.domain.model.review import (
 )
 from sat_descarga_masiva.domain.model.source import SourceIdentity
 from sat_descarga_masiva.domain.model.value_objects import RequestId, Rfc, Uuid
+from sat_descarga_masiva.domain.policy.money import amount_as_text, amount_from_text
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 """SQLite schema version written to ``PRAGMA user_version`` by ``init_schema``.
 
 1 = M1 ledger tables (download_jobs, download_cursors, source_records)
@@ -72,6 +82,10 @@ SCHEMA_VERSION = 5
 5 = M3 accounting assumptions: journal_entries.assumptions, the §8:171 evidence a
     rule presumed (a JSON array of the stable ``AccountingAssumption`` words, ``[]``
     when it presumed nothing)
+6 = M3 posting-time account resolution: a nullable journal_lines.resolved_account,
+    the §8a:207 account a role resolved to when the leg was posted, so a POSTED
+    leg stays explainable without the client's current YAML (NULL on a leg nothing
+    was posted to — a PROPOSED/refused audit row)
 """
 
 _CREATE_DOWNLOAD_JOBS = """
@@ -306,6 +320,13 @@ CREATE TABLE IF NOT EXISTS journal_entries (
 #: and never REAL (§4). An entry may have zero legs (§8a:204's 4.10/4.13 drafts), so
 #: nothing requires a leg. The parent link is a recorded key verified by the test suite;
 #: SQLite foreign keys are not enforced anywhere in this repository (M2-E convention).
+#: ``account_role`` is the semantic role the rule named and ``resolved_account`` the
+#: concrete account the client's mapping resolved it to *at posting time* (§8a:207), so a
+#: POSTED leg never depends on today's YAML. It is nullable because ``None`` is the
+#: resolution of a leg nothing was posted to: a refused entry's unmapped role is a
+#: ``PROPOSED`` audit row, and a skip has no legs at all (§8:161). A POSTED aggregate that
+#: left a leg unresolved is refused by ``JournalEntryStore``'s shared contract, never
+#: stored — the column's nullability is about *non-posted* rows, not about POSTED ones.
 _CREATE_JOURNAL_LINES = """
 CREATE TABLE IF NOT EXISTS journal_lines (
     entry_key TEXT NOT NULL,
@@ -314,6 +335,7 @@ CREATE TABLE IF NOT EXISTS journal_lines (
     account_role TEXT NOT NULL,
     side TEXT NOT NULL,
     amount TEXT NOT NULL,
+    resolved_account TEXT,
     PRIMARY KEY (entry_key, line_key),
     UNIQUE (entry_key, ordinal)
 )
@@ -398,6 +420,10 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     # column a fresh database was just built with. ``_ensure_entry_assumptions`` does
     # the work, idempotently, so this step carries no statements.
     5: (),
+    # The same shape as v5, for the same reason: ``journal_lines`` exists since step 4,
+    # so the posting-time account is an additive column, not a statement this ladder can
+    # carry. ``_ensure_line_resolved_account`` adds it, idempotently.
+    6: (),
 }
 
 _DOCUMENT_COLUMNS = """
@@ -526,6 +552,57 @@ _SELECT_RUNS_FOR_CLIENT = f"""
 SELECT {_RUN_COLUMNS} FROM pipeline_runs WHERE client_rfc = ? ORDER BY started_at, run_id
 """
 
+#: `journal_entries` and `posting_snapshot` are two halves of one recorded fact — the entry
+#: and the evidence written beside it (§8:159) — so a read joins them instead of trusting the
+#: entry row on its own. ``policy_version`` lives only in the snapshot (it is evidence about
+#: the posting, not part of its identity), which is what makes the join mandatory rather than
+#: a convenience. ``LEFT JOIN`` so a half-written posting is *seen* and refused, never
+#: silently read as "no such entry".
+_JOURNAL_ENTRY_COLUMNS = """
+    e.entry_key, e.contributor_rfc, e.source_uuid, e.source_hash, e.rule_id, e.rule_version,
+    e.mapping_version, e.posting_state, e.entry_date, e.recorded_at, e.assumptions,
+    s.policy_version
+"""
+
+_SELECT_JOURNAL_ENTRY = f"""
+SELECT {_JOURNAL_ENTRY_COLUMNS}
+FROM journal_entries AS e LEFT JOIN posting_snapshot AS s ON s.entry_key = e.entry_key
+WHERE e.entry_key = ?
+"""
+
+_SELECT_JOURNAL_ENTRIES_FOR_SOURCE = f"""
+SELECT {_JOURNAL_ENTRY_COLUMNS}
+FROM journal_entries AS e LEFT JOIN posting_snapshot AS s ON s.entry_key = e.entry_key
+WHERE e.contributor_rfc = ? AND e.source_uuid = ?
+ORDER BY e.recorded_at, e.entry_key
+"""
+
+_SELECT_JOURNAL_LINES = """
+SELECT line_key, ordinal, account_role, side, amount, resolved_account
+FROM journal_lines WHERE entry_key = ? ORDER BY ordinal
+"""
+
+_INSERT_JOURNAL_ENTRY = """
+INSERT INTO journal_entries (
+    entry_key, contributor_rfc, source_uuid, source_hash, rule_id, rule_version,
+    mapping_version, posting_state, entry_date, recorded_at, assumptions
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_INSERT_JOURNAL_LINE = """
+INSERT INTO journal_lines (
+    entry_key, ordinal, line_key, account_role, side, amount, resolved_account
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+"""
+
+#: The valuation columns are deliberately absent: §8:192's columns are for a conversion that
+#: did not happen, so they stay NULL. Writing them explicitly here would state a fact.
+_INSERT_POSTING_SNAPSHOT = """
+INSERT INTO posting_snapshot (
+    entry_key, source_hash, rule_version, policy_version, mapping_version, posted_at
+) VALUES (?, ?, ?, ?, ?, ?)
+"""
+
 
 def _iso(value: datetime) -> str:
     """Serialize as tz-aware UTC (naive treated as UTC; aware converted to UTC)."""
@@ -602,6 +679,29 @@ def _ensure_entry_assumptions(conn: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_line_resolved_account(conn: sqlite3.Connection) -> None:
+    """Add `journal_lines.resolved_account` to a schema-5 database (M3, §8a:207).
+
+    The v4 step created the table and v6 adds a column to it, so this is the same
+    guarded, additive ALTER shape v5 used for the entry's assumptions. No table, no-op;
+    column already present, no-op — which also covers the fresh database, whose table
+    step 4 just built with the column.
+
+    It is deliberately *nullable and without a default*: the column records what the
+    mapping resolved a leg to **when it was posted**, and only a POSTED leg has such a
+    fact. A pre-v6 row had no such fact — no journal writer existed before v6, and a
+    non-posted leg resolves nothing — so ``NULL`` ("not recorded") is the truthful
+    value, never a backfilled or invented account. The POSTED-needs-an-account rule is
+    the writer's shared invariant (``JournalEntryRecord``), not a table default, because
+    SQLite cannot express "required *when* ``posting_state = 'posted'``" without a
+    trigger — and a trigger would freeze the column against the very ALTERs the ladder
+    depends on.
+    """
+    columns = _columns(conn, "journal_lines")
+    if columns and "resolved_account" not in columns:
+        conn.execute("ALTER TABLE journal_lines ADD COLUMN resolved_account TEXT")
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """Create/migrate the SQLite schema up to :data:`SCHEMA_VERSION` (§11).
 
@@ -620,6 +720,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_run_link(conn)
     _ensure_profile_postal_code(conn)
     _ensure_entry_assumptions(conn)
+    _ensure_line_resolved_account(conn)
     if version < SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
@@ -1240,3 +1341,162 @@ class SqlitePipelineRunRepository:
     def for_client(self, client_rfc: Rfc) -> tuple[PipelineRun, ...]:
         rows = self._conn.execute(_SELECT_RUNS_FOR_CLIENT, (client_rfc.value,)).fetchall()
         return tuple(_run_from_row(row) for row in rows)
+
+
+def _journal_line_from_row(row: sqlite3.Row) -> JournalLineRecord:
+    return JournalLineRecord(
+        account_role=AccountRole(row["account_role"]),
+        line_key=row["line_key"],
+        ordinal=int(row["ordinal"]),
+        side=LineSide(row["side"]),
+        amount=amount_from_text(row["amount"]),
+        resolved_account=row["resolved_account"],
+    )
+
+
+def _journal_entry_from_row(
+    row: sqlite3.Row, lines: tuple[JournalLineRecord, ...]
+) -> JournalEntryRecord:
+    """One `journal_entries` row (joined with its snapshot) as the aggregate it recorded.
+
+    A missing ``policy_version`` means the entry exists without the evidence §8:159 records
+    with it — a half-written posting, which ``append`` cannot produce (the three rows share
+    one transaction). It is refused loudly rather than read as an entry whose policy version
+    was blank: an unreadable posting is store corruption, and quietly reconstructing a
+    lesser fact from it would be the same mistake §8:166 exists to prevent.
+    """
+    if row["policy_version"] is None:
+        raise ValueError(
+            f"journal entry {row['entry_key']} has no posting snapshot: §8:159 records the"
+            " policy version with the posting, so half a posting is no posting"
+        )
+    return JournalEntryRecord(
+        entry_key=row["entry_key"],
+        contributor_rfc=Rfc(row["contributor_rfc"]),
+        source_uuid=Uuid(row["source_uuid"]),
+        source_hash=row["source_hash"],
+        rule_id=row["rule_id"],
+        rule_version=row["rule_version"],
+        mapping_version=row["mapping_version"],
+        policy_version=row["policy_version"],
+        posting_state=PostingState(row["posting_state"]),
+        entry_date=date.fromisoformat(row["entry_date"]),
+        recorded_at=_from_iso(row["recorded_at"]),
+        assumptions=decode_assumptions(row["assumptions"]),
+        lines=lines,
+    )
+
+
+class SqliteJournalEntryStore:
+    """JournalEntryStore over `journal_entries` + `journal_lines` + `posting_snapshot`.
+
+    One posting is three writes — the entry, its legs, and the evidence §8:159 records
+    with it — and they are written together (`append` commits once, at the end; any
+    failure rolls the transaction back) so a reader can never meet half of one.
+
+    Nothing here decides *what* a posting is: the record arrives complete, with
+    ``JournalEntryRecord``'s POSTED-needs-an-account invariant already enforced, so the
+    adapter's whole job is to write it once and truthfully. Append-only, by the same
+    machinery as the ledger — the §8:194 ``entry_key`` is the primary key and the table's
+    guards refuse UPDATE/DELETE — and idempotent the same way ``SqliteFiscalEventStore``
+    is: the identical record re-appended is a no-op, while a *different* record under the
+    same key is an ``ImmutableRecordConflict``. That check runs before anything is
+    written, so the refusal can name what is already recorded instead of leaving a
+    partially-inserted posting behind.
+
+    ``commit=False`` makes the posting durable only when an explicit unit of work says so
+    (the M2.8 convention): a posting is one fact, but it may belong to a larger one, and
+    this store's own COMMIT would end that unit early. In that mode rollback is the unit
+    of work's business too — this store never rolls back a transaction it did not begin.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, *, commit: bool = True) -> None:
+        conn.row_factory = sqlite3.Row
+        self._conn = conn
+        self._commit_writes = commit
+        self._conn.execute(_CREATE_JOURNAL_ENTRIES)
+        self._conn.execute(_CREATE_JOURNAL_LINES)
+        self._conn.execute(_CREATE_POSTING_SNAPSHOT)
+
+    def append(self, record: JournalEntryRecord) -> None:
+        incoming = replace(record, recorded_at=_utc(record.recorded_at))
+        existing = self._row(incoming.entry_key)
+        if existing is not None:
+            if self._record(existing) != incoming:
+                raise ImmutableRecordConflict(
+                    f"journal entry {incoming.entry_key} is already recorded with different"
+                    " content: a posting state is assigned once (§8:166)"
+                )
+            return  # identical re-append: idempotent no-op
+        try:
+            self._insert(incoming)
+        except sqlite3.IntegrityError:
+            if self._commit_writes:
+                self._conn.rollback()  # one posting: all three rows, or none of them
+            raise
+        self._commit_write()
+
+    def get(self, entry_key: str) -> JournalEntryRecord | None:
+        row = self._row(entry_key)
+        return None if row is None else self._record(row)
+
+    def for_source(self, contributor_rfc: Rfc, source_uuid: Uuid) -> tuple[JournalEntryRecord, ...]:
+        rows = self._conn.execute(
+            _SELECT_JOURNAL_ENTRIES_FOR_SOURCE,
+            (contributor_rfc.value, source_uuid.value),
+        ).fetchall()
+        return tuple(self._record(row) for row in rows)
+
+    def _insert(self, record: JournalEntryRecord) -> None:
+        self._conn.execute(
+            _INSERT_JOURNAL_ENTRY,
+            (
+                record.entry_key,
+                record.contributor_rfc.value,
+                record.source_uuid.value,
+                record.source_hash,
+                record.rule_id,
+                record.rule_version,
+                record.mapping_version,
+                record.posting_state.value,
+                record.entry_date.isoformat(),
+                _iso(record.recorded_at),
+                encode_assumptions(record.assumptions),
+            ),
+        )
+        for line in record.lines:
+            self._conn.execute(
+                _INSERT_JOURNAL_LINE,
+                (
+                    record.entry_key,
+                    line.ordinal,
+                    line.line_key,
+                    line.account_role.value,
+                    line.side.value,
+                    amount_as_text(line.amount),
+                    line.resolved_account,
+                ),
+            )
+        self._conn.execute(
+            _INSERT_POSTING_SNAPSHOT,
+            (
+                record.entry_key,
+                record.source_hash,
+                record.rule_version,
+                record.policy_version,
+                record.mapping_version,
+                _iso(record.recorded_at),
+            ),
+        )
+
+    def _row(self, entry_key: str) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(_SELECT_JOURNAL_ENTRY, (entry_key,)).fetchone()
+        return row
+
+    def _record(self, row: sqlite3.Row) -> JournalEntryRecord:
+        lines = self._conn.execute(_SELECT_JOURNAL_LINES, (row["entry_key"],)).fetchall()
+        return _journal_entry_from_row(row, tuple(_journal_line_from_row(line) for line in lines))
+
+    def _commit_write(self) -> None:
+        if self._commit_writes:
+            self._conn.commit()

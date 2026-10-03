@@ -4,9 +4,11 @@ M3 adds four tables and all four are facts: an entry's posting state is assigned
 (§8:166), a leg is never edited, a metadata observation is historical (§6), and the
 posting snapshot is the evidence recorded at posting time (§11 M3). The schema says so
 itself — every one of them refuses UPDATE and DELETE — and the ladder only adds, so a
-v3 database keeps every row it had. Schema v5 adds one column on top of those tables:
-`journal_entries.assumptions`, the §8:171 evidence a rule presumed — `[]` when it
-presumed nothing.
+v3 database keeps every row it had. Two later steps add a column on top of those tables:
+v5's `journal_entries.assumptions`, the §8:171 evidence a rule presumed — `[]` when it
+presumed nothing — and v6's nullable `journal_lines.resolved_account`, the §8a:207
+account a role resolved to when the leg was posted (``NULL`` on a leg nothing was
+posted to).
 """
 
 import sqlite3
@@ -52,6 +54,10 @@ _INSERT_ENTRY = (
 _INSERT_LINE = (
     "INSERT INTO journal_lines (entry_key, ordinal, line_key, account_role, side, amount)"
     " VALUES (?, ?, ?, ?, ?, ?)"
+)
+_INSERT_LINE_WITH_ACCOUNT = (
+    "INSERT INTO journal_lines (entry_key, ordinal, line_key, account_role, side, amount,"
+    " resolved_account) VALUES (?, ?, ?, ?, ?, ?, ?)"
 )
 _INSERT_SNAPSHOT = (
     "INSERT INTO posting_snapshot (entry_key, source_hash, rule_version, policy_version,"
@@ -118,22 +124,45 @@ def _seed_snapshot(conn: sqlite3.Connection, entry_key: str) -> None:
 
 
 def _v4_database() -> sqlite3.Connection:
-    """A database as M3 (schema 4) left it: every table and guard, no `assumptions`.
+    """A database as M3 (schema 4) left it: every table and guard, and neither column
+    that M3's later steps add.
 
-    Step 4 created `journal_entries` without the v5 column, so a real v4 database is the
-    current schema minus that one column — built by dropping it from the real DDL rather
-    than by restating step 4's `CREATE TABLE` in a fixture. A restated DDL cannot be
-    checked against anything and drifts the moment step 4 changes; a *partial* one also
-    lies about the other three M3 tables, which the ladder never re-creates for a v4
-    database (step 4 has already run, so only step 5 runs). `assumptions` is neither
-    key, index, nor referenced by a guard, so the drop leaves exactly what step 4's
-    `CREATE TABLE` left behind, column for column.
+    Step 4 created `journal_entries` without `assumptions` and `journal_lines` without
+    `resolved_account`, so a real v4 database is the current schema minus exactly those
+    two columns — built by dropping them from the real DDL rather than by restating step
+    4's `CREATE TABLE` in a fixture. A restated DDL cannot be checked against anything and
+    drifts the moment step 4 changes; a *partial* one also lies about the other two M3
+    tables, which the ladder never re-creates for a v4 database (step 4 has already run,
+    so only steps 5 and 6 run). Neither column is a key, an index, or referenced by a
+    guard, so the drops leave exactly what step 4's `CREATE TABLE` left behind, column for
+    column.
     """
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     _seed_entry(conn, "entry-1")
+    _seed_line(conn, "entry-1")
     conn.execute("ALTER TABLE journal_entries DROP COLUMN assumptions")
+    conn.execute("ALTER TABLE journal_lines DROP COLUMN resolved_account")
     conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    return conn
+
+
+def _v5_database() -> sqlite3.Connection:
+    """A database as schema 5 left it: the v5 `assumptions` column, no `resolved_account`.
+
+    The v6 step's starting point, and the only fixture that isolates it: `_v4_database()`
+    exercises both additive steps at once, which is right for the ladder as a whole but
+    cannot say whether *v6* reproduces the `CREATE` on its own. Dropping that one column is
+    the same faithful construction as above — step 4 created `journal_lines`, v6 added the
+    column — and a leg row is seeded first so the upgrade has something to keep.
+    """
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    _seed_entry(conn, "entry-1")
+    _seed_line(conn, "entry-1")
+    conn.execute("ALTER TABLE journal_lines DROP COLUMN resolved_account")
+    conn.execute("PRAGMA user_version = 5")
     conn.commit()
     return conn
 
@@ -190,7 +219,7 @@ def _proposed_entry() -> ProposedJournalEntry:
 
 def test_the_ladder_adds_the_four_m3_tables() -> None:
     conn = _conn()
-    assert _user_version(conn) == SCHEMA_VERSION == 5
+    assert _user_version(conn) == SCHEMA_VERSION == 6
     assert _table_names(conn) >= set(M3_TABLES)
 
 
@@ -209,6 +238,72 @@ def test_the_ladder_adds_the_assumption_column_as_the_v5_step() -> None:
         "default": "'[]'",
         "pk": 0,
     }
+
+
+def test_the_ladder_adds_the_posting_time_account_as_the_v6_step() -> None:
+    """§8a:207: the account a leg resolved to is recorded with the leg — and may be NULL.
+
+    `NULL` is not "unknown". A leg nothing was posted to — the unmapped role of a refused
+    `PROPOSED` entry, which §8:167 keeps as audit evidence — genuinely resolves to no
+    account, so the column carries no `DEFAULT` and no `NOT NULL`. What a POSTED row may
+    not leave NULL is the writer's invariant (`JournalEntryRecord`, §8:159), which SQLite
+    cannot state as a column constraint: it holds *conditionally*, on the posting state of
+    a row in another table.
+    """
+    conn = _conn()
+    assert _column_spec(conn, "journal_lines", "resolved_account") == {
+        "type": "TEXT",
+        "notnull": 0,
+        "default": None,
+        "pk": 0,
+    }
+
+
+def test_the_posting_time_account_is_the_last_line_column() -> None:
+    """The `CREATE` must place it last, because SQLite's additive `ALTER` appends.
+
+    A fresh database gets the column from `CREATE TABLE`; an upgraded one gets it from
+    `ALTER TABLE ... ADD COLUMN`, which can only append. Only the same position makes the
+    two one schema, which the row-for-row comparison in
+    `test_a_v5_upgrade_lands_on_the_same_schema_a_fresh_database_gets` proves — this states
+    why the DDL is written the way it is, so a later edit cannot quietly move it.
+    """
+    conn = _conn()
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(journal_lines)")]
+    assert columns[-1] == "resolved_account"
+
+
+def test_a_leg_records_the_account_it_was_posted_to_or_nothing_at_all() -> None:
+    """§8a:207: the role is the rule's word and the account the mapping's answer.
+
+    The two sit side by side because they answer different questions — `clientes` is what
+    the rule named, `105-001` is what this client's chart made of it at posting time — and
+    the column is nullable precisely so a refused entry can store the role it could not
+    resolve.
+    """
+    conn = _conn()
+    _seed_entry(conn, "entry-1")
+    _seed_line(conn, "entry-1")  # nothing was posted to this leg
+    conn.execute(
+        _INSERT_LINE_WITH_ACCOUNT,
+        (
+            "entry-1",
+            1,
+            "iva",
+            AccountRole.IVA_TRASLADADO_COBRADO.value,
+            "haber",
+            "16.00",
+            "208-001",
+        ),
+    )
+    conn.commit()
+    rows = conn.execute(
+        "SELECT line_key, account_role, resolved_account FROM journal_lines ORDER BY ordinal"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("total", AccountRole.CLIENTES.value, None),
+        ("iva", AccountRole.IVA_TRASLADADO_COBRADO.value, "208-001"),
+    ]
 
 
 def test_the_ladder_is_idempotent_including_its_guards() -> None:
@@ -233,21 +328,22 @@ def test_a_v3_database_upgrades_to_the_current_version_and_keeps_its_rows() -> N
 
     init_schema(conn)
 
-    assert _user_version(conn) == SCHEMA_VERSION == 5
+    assert _user_version(conn) == SCHEMA_VERSION == 6
     assert _table_names(conn) >= set(M3_TABLES)
     row = conn.execute("SELECT sha256 FROM source_records WHERE uuid = ?", (UUID_TEXT,)).fetchone()
     assert row[0] == HASH
-    init_schema(conn)  # idempotent on an already-migrated v5 database
-    assert _user_version(conn) == 5
+    init_schema(conn)  # idempotent on an already-migrated v6 database
+    assert _user_version(conn) == 6
 
 
 def test_a_v4_database_upgrades_and_keeps_its_rows() -> None:
-    """The v5 step adds a column to a guarded v4 table: the row survives, reading `[]`.
+    """The v5 and v6 steps add columns to guarded v4 tables: the rows survive.
 
     `[]` is not a placeholder for "unknown". No application journal writer existed
     before v5 — `journal_entries` has no repository and no port — so no stored row can
     have lost an assumption, and `[]` is the domain's own value for "presumed
-    nothing". Nothing is backfilled, and the v4 guards are left exactly as they were.
+    nothing"; `resolved_account` reads ``NULL`` for the same reason on a non-posted leg.
+    Nothing is backfilled, and the v4 guards are left exactly as they were.
     """
     conn = _v4_database()
     assert _user_version(conn) == 4
@@ -258,31 +354,81 @@ def test_a_v4_database_upgrades_and_keeps_its_rows() -> None:
 
     init_schema(conn)
 
-    assert _user_version(conn) == SCHEMA_VERSION == 5
+    assert _user_version(conn) == SCHEMA_VERSION == 6
     assert _column_spec(conn, "journal_entries", "assumptions")["default"] == "'[]'"
     assert _trigger_names(conn) == guards  # the v4 guards are left exactly as they were
     row = conn.execute(
         "SELECT entry_key, posting_state, assumptions FROM journal_entries"
     ).fetchone()
     assert tuple(row) == ("entry-1", PostingState.POSTED.value, "[]")
-    init_schema(conn)  # idempotent on an already-migrated v5 database
-    assert _user_version(conn) == 5
+    line = conn.execute(
+        "SELECT line_key, account_role, amount, resolved_account FROM journal_lines"
+    ).fetchone()
+    assert tuple(line) == ("total", AccountRole.CLIENTES.value, "116.00", None)
+    init_schema(conn)  # idempotent on an already-migrated v6 database
+    assert _user_version(conn) == 6
 
 
 def test_a_v4_upgrade_lands_on_the_same_schema_a_fresh_database_gets() -> None:
     """The `ALTER` reproduces the `CREATE` exactly, not merely the column (§8:161).
 
-    A fresh database gets `assumptions` from the table's `CREATE`, a v4 database from
-    the guarded `ALTER`; afterwards the two must be indistinguishable, or a fresh
-    install and an upgrade would carry different contracts for the same row. Comparing
-    `PRAGMA table_info` row for row pins position, type, nullability and default at
-    once, for every M3 table — not only the one the step touches.
+    A fresh database gets both columns from the tables' `CREATE`, a v4 database from the
+    guarded `ALTER`s; afterwards the two must be indistinguishable, or a fresh install and
+    an upgrade would carry different contracts for the same row. Comparing
+    `PRAGMA table_info` row for row pins position, type, nullability and default at once,
+    for every M3 table — not only the ones the steps touch.
     """
     upgraded = _v4_database()
     init_schema(upgraded)
     fresh = _conn()
 
-    assert _user_version(upgraded) == _user_version(fresh) == SCHEMA_VERSION == 5
+    assert _user_version(upgraded) == _user_version(fresh) == SCHEMA_VERSION == 6
+    for table in M3_TABLES:
+        assert list(upgraded.execute(f"PRAGMA table_info({table})")) == list(
+            fresh.execute(f"PRAGMA table_info({table})")
+        ), table
+    assert _trigger_names(upgraded) == _trigger_names(fresh)
+
+
+def test_a_v5_database_upgrades_and_keeps_its_rows() -> None:
+    """The v6 step adds a column to a guarded v5 table: the leg survives, reading NULL.
+
+    ``NULL`` is not a placeholder for "unknown" here either. No application journal writer
+    existed before v6 — `journal_lines` had no repository and no port — so no stored leg
+    lost the account it was posted to, and a leg of a *refused* decision would truthfully
+    have none anyway. Nothing is backfilled, and the v5 guards are left untouched.
+    """
+    conn = _v5_database()
+    assert _user_version(conn) == 5
+    assert "resolved_account" not in _columns(conn, "journal_lines")
+    assert _column_spec(conn, "journal_entries", "assumptions")["notnull"] == 1
+    guards = _trigger_names(conn)
+    assert len(guards) == 8
+
+    init_schema(conn)
+
+    assert _user_version(conn) == SCHEMA_VERSION == 6
+    assert _trigger_names(conn) == guards  # the v5 guards are left exactly as they were
+    row = conn.execute(
+        "SELECT line_key, account_role, amount, resolved_account FROM journal_lines"
+    ).fetchone()
+    assert tuple(row) == ("total", AccountRole.CLIENTES.value, "116.00", None)
+    init_schema(conn)  # idempotent on an already-migrated v6 database
+    assert _user_version(conn) == 6
+
+
+def test_a_v5_upgrade_lands_on_the_same_schema_a_fresh_database_gets() -> None:
+    """As for a v4 database: the v6 `ALTER` reproduces the `CREATE`, position included.
+
+    The v4 fixture exercises both additive steps at once, so this is the one that isolates
+    *v6*: a v5 database upgraded by the step alone must end up with the same `journal_lines`
+    a fresh database was built with — not merely with a column of the same name.
+    """
+    upgraded = _v5_database()
+    init_schema(upgraded)
+    fresh = _conn()
+
+    assert _user_version(upgraded) == _user_version(fresh) == SCHEMA_VERSION == 6
     for table in M3_TABLES:
         assert list(upgraded.execute(f"PRAGMA table_info({table})")) == list(
             fresh.execute(f"PRAGMA table_info({table})")

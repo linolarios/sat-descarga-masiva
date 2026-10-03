@@ -1,6 +1,6 @@
-"""In-memory adapters: TokenStore, RequestRepository, the M1 ledger repos and
-the M2 stores (`documents`, `fiscal_events`, `contributor_profiles`,
-`csf_artifacts`, `review_flags`, `pipeline_runs`).
+"""In-memory adapters: TokenStore, RequestRepository, the M1 ledger repos, the M2
+stores (`documents`, `fiscal_events`, `contributor_profiles`, `csf_artifacts`,
+`review_flags`, `pipeline_runs`) and the M3 journal store (`journal_entries`).
 
 They implement the same ports as the SQLite adapters and are held to the same
 behavior by the shared contract suite (§12). Timestamps are normalized to
@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 
+from sat_descarga_masiva.contabilidad.journal import JournalEntryRecord
 from sat_descarga_masiva.domain.enums.catalog import Direction, ServiceType
 from sat_descarga_masiva.domain.errors import (
     ImmutableRecordConflict,
@@ -332,3 +333,41 @@ class InMemoryPipelineRunRepository:
 
     def for_client(self, client_rfc: Rfc) -> tuple[PipelineRun, ...]:
         return tuple(run for run in self._runs.values() if run.client_rfc.value == client_rfc.value)
+
+
+class InMemoryJournalEntryStore:
+    """JournalEntryStore over an append-only dict keyed by §8:194's ``entry_key``.
+
+    One record *is* the whole posting (entry, legs and evidence together), so the
+    in-memory adapter needs no partial write: a record is either stored or not, which is
+    the same guarantee ``SqliteJournalEntryStore`` buys with its transaction.
+    ``for_source`` sorts by ``(recorded_at, entry_key)`` — the total order the SQLite
+    adapter reads in — so the two adapters cannot disagree about the order they report.
+    """
+
+    def __init__(self) -> None:
+        self._records: dict[str, JournalEntryRecord] = {}
+
+    def append(self, record: JournalEntryRecord) -> None:
+        incoming = replace(record, recorded_at=_utc(record.recorded_at))
+        existing = self._records.get(incoming.entry_key)
+        if existing is not None:
+            if existing != incoming:
+                raise ImmutableRecordConflict(
+                    f"journal entry {incoming.entry_key} is already recorded with different"
+                    " content: a posting state is assigned once (§8:166)"
+                )
+            return  # identical re-append: idempotent no-op
+        self._records[incoming.entry_key] = incoming
+
+    def get(self, entry_key: str) -> JournalEntryRecord | None:
+        return self._records.get(entry_key)
+
+    def for_source(self, contributor_rfc: Rfc, source_uuid: Uuid) -> tuple[JournalEntryRecord, ...]:
+        matching = (
+            record
+            for record in self._records.values()
+            if record.contributor_rfc.value == contributor_rfc.value
+            and record.source_uuid.value == source_uuid.value
+        )
+        return tuple(sorted(matching, key=lambda record: (record.recorded_at, record.entry_key)))

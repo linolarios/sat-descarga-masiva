@@ -40,9 +40,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from sat_descarga_masiva.application.ports.accounting import AccountMapping, MappingProvider
-from sat_descarga_masiva.contabilidad.journal import PostingState, ProposedJournalEntry
+from sat_descarga_masiva.contabilidad.journal import (
+    JournalEntryRecord,
+    JournalLineRecord,
+    PostingState,
+    ProposedJournalEntry,
+)
 from sat_descarga_masiva.contabilidad.roles import AccountRole
 from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, ReviewRequest, Skip
 from sat_descarga_masiva.contabilidad.rules.scope import OUT_OF_SCOPE_RULES
@@ -135,6 +141,60 @@ class PostingDecision:
     def account_for(self, role: AccountRole) -> str | None:
         """The account a leg was posted to, or ``None`` when nothing was posted for it."""
         return self.accounts.get(role)
+
+    def to_record(self, *, recorded_at: datetime) -> JournalEntryRecord:
+        """This decision as the durable record a ``JournalEntryStore`` accepts (§8:166).
+
+        The projection lives beside the verdict it records, not in an adapter: both stores
+        then receive the same aggregate, and none of them gets to decide what a decision
+        "really" was. The entry's §8:194 fingerprint *is* the ``entry_key`` — recomputed
+        from the decision's own mapping version, so the key and the versions it names
+        cannot drift apart — and each leg carries the account this decision resolved
+        (§8a:207), or ``None`` when it resolved nothing (which is why an unresolved leg on
+        a ``POSTED`` decision cannot be turned into a record at all: ``JournalEntryRecord``
+        refuses it, and this class never produces it in the first place).
+
+        A decision that names no entry is not recordable: ``entry is None`` means the
+        document itself could not be keyed (§8a:209's missing date, or no TFD UUID), and
+        §8:167 attaches that review fact to the *document* — there is no §8:194 identity to
+        append under, and inventing one is what that rule exists to prevent.
+        """
+        if self.entry is None:
+            raise ValueError(
+                "§8:167: a decision that names no entry has nothing to record — without"
+                " source_uuid + entry_date there is no §8:194 identity to append under"
+            )
+        source_uuid = self.entry.source_uuid
+        if source_uuid is None:
+            raise ValueError(
+                "§8:194: an entry without a source_uuid has no fingerprint to be keyed by,"
+                " so it cannot be recorded (§8:167 flags the document instead)"
+            )
+        return JournalEntryRecord(
+            entry_key=self.entry.fingerprint(self.mapping_version).canonical(),
+            contributor_rfc=self.entry.contributor_rfc,
+            source_uuid=source_uuid,
+            source_hash=self.entry.source_hash,
+            rule_id=self.entry.rule_id,
+            rule_version=self.entry.rule_version,
+            mapping_version=self.mapping_version,
+            policy_version=self.policy_version,
+            posting_state=self.posting_state,
+            entry_date=self.entry.entry_date,
+            recorded_at=recorded_at,
+            assumptions=self.entry.assumptions,
+            lines=tuple(
+                JournalLineRecord(
+                    account_role=line.account_role,
+                    line_key=line.line_key,
+                    ordinal=ordinal,
+                    side=line.side,
+                    amount=line.amount,
+                    resolved_account=self.account_for(line.account_role),
+                )
+                for ordinal, line in enumerate(self.entry.lines)
+            ),
+        )
 
 
 class PostingEligibilityValidator:

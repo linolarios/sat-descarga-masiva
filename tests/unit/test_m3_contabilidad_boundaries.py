@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 
 from sat_descarga_masiva import contabilidad as contabilidad_package
+from sat_descarga_masiva.application.ports import persistence as persistence_port
 
 _CONTABILIDAD_ROOT = Path(contabilidad_package.__file__ or "").parent
 _CONTABILIDAD_PREFIX = "sat_descarga_masiva.contabilidad"
@@ -221,3 +222,36 @@ def test_the_contabilidad_package_uses_no_float_amounts() -> None:
         if (lines := _float_usages(source, filename=name))
     }
     assert not offenders
+
+
+# --- the journal records, and the port that names them --------------------------------
+
+
+def test_the_journal_records_a_store_writes_are_the_engines_own() -> None:
+    """§4: the codec and the aggregate a store writes carry no adapter and no library.
+
+    A SQLite adapter has to import `JournalEntryRecord` and §8:171's codec, and the engine
+    has to be able to enforce the POSTED invariant without one — so the module owning both
+    is judged by the same allow-list as the rest of `contabilidad/`: the standard library,
+    the domain and the application, and nothing else.
+    """
+    modules = _imported_modules(_package_sources()["journal.py"], filename="journal.py")
+    assert not _forbidden_modules(modules)
+    assert not _external_modules(modules)
+    assert sorted(module for module in modules if module.startswith("sat_descarga_masiva")) == [
+        "sat_descarga_masiva.contabilidad.roles",
+        "sat_descarga_masiva.domain.model.value_objects",
+        "sat_descarga_masiva.domain.policy.money",
+    ]
+
+
+def test_the_journal_port_names_the_record_without_naming_an_adapter() -> None:
+    """§4: the port speaks the engine's aggregate, so it needs no adapter to describe it."""
+    modules = _imported_modules(
+        Path(persistence_port.__file__ or "").read_text(encoding="utf-8"),
+        filename="persistence.py",
+    )
+    assert "sat_descarga_masiva.contabilidad.journal" in modules  # the aggregate it stores
+    assert not [
+        module for module in modules if module.startswith("sat_descarga_masiva.infrastructure")
+    ]

@@ -16,21 +16,31 @@ Three of §8's invariants are structural here rather than checked later:
 - `assumptions` records what a rule *presumed* rather than verified (§8:171) as
   entry-level evidence — deliberately not a `line_key`, so promoting an assumption
   later cannot change which facts were posted (§8:194).
+
+What the ledger *writes down* goes through one codec (`encode_assumptions` /
+`decode_assumptions`, §8:171's persisted TEXT) and one aggregate
+(`JournalEntryRecord` / `JournalLineRecord`), so the invariant that a `POSTED` entry
+resolves every leg (§8:159) belongs to the record both stores accept — not to an adapter
+that could forget it.
 """
 
-from dataclasses import fields
-from datetime import date
+from dataclasses import FrozenInstanceError, fields
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 
 from sat_descarga_masiva.contabilidad.journal import (
     AccountingAssumption,
+    JournalEntryRecord,
     JournalLine,
+    JournalLineRecord,
     LineSide,
     PostingFingerprint,
     PostingState,
     ProposedJournalEntry,
+    decode_assumptions,
+    encode_assumptions,
 )
 from sat_descarga_masiva.contabilidad.roles import AccountRole
 from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
@@ -41,9 +51,11 @@ OTHER_RFC = Rfc("BBB010101BBB")
 UUID = Uuid("4e80345d-917f-40bb-a98f-4a73939353c5")
 SOURCE_HASH = "a" * 64
 ENTRY_DATE = date(2026, 1, 31)
+RECORDED_AT = datetime(2026, 1, 31, 12, 0, tzinfo=UTC)
 RULE_ID = "4.1"
 RULE_VERSION = "1"
 MAPPING_VERSION = "2026.01"
+POLICY_VERSION = "1"
 
 
 def _amount(text: str) -> NormalizedAmount:
@@ -317,3 +329,212 @@ def test_an_entry_without_a_source_uuid_has_no_fingerprint() -> None:
 def test_the_entry_never_carries_the_mapping_version() -> None:
     """§8:196: rules are role-typed — the mapping version arrives with the resolution."""
     assert "mapping_version" not in {field.name for field in fields(ProposedJournalEntry)}
+
+
+# --- the persisted assumptions codec (§8:171) ----------------------------------------
+
+
+@pytest.mark.parametrize("assumption", list(AccountingAssumption))
+def test_the_assumption_codec_round_trips_every_word(assumption: AccountingAssumption) -> None:
+    """Whatever the vocabulary grows to, the persisted word survives it verbatim.
+
+    Parametrised over the enum rather than over literal strings, so a second assumption
+    value is covered the day it is declared — the codec's contract is the *domain's*
+    vocabulary, not the one member that happens to exist today.
+    """
+    text = encode_assumptions((assumption,))
+    assert text == f'["{assumption.value}"]'
+    assert decode_assumptions(text) == (assumption,)
+
+
+def test_the_codec_states_no_assumption_as_an_empty_array() -> None:
+    """ "Presumed nothing" is `[]`, the domain's own value — not `null`, not an absent column."""
+    assert encode_assumptions(()) == "[]"
+    assert decode_assumptions("[]") == ()
+
+
+def test_the_codec_is_deterministic() -> None:
+    """The same evidence always serializes to the same text — it is a record, not a print."""
+    assumptions = (AccountingAssumption.ASSUMED_PUE,)
+    assert encode_assumptions(assumptions) == encode_assumptions(assumptions)
+    assert encode_assumptions(assumptions) == '["assumed_pue"]'  # no incidental whitespace
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("assumed_pue", id="bare-word"),
+        pytest.param("[assumed_pue]", id="unquoted-word"),
+        pytest.param("{}", id="object-not-array"),
+        pytest.param('"assumed_pue"', id="scalar-not-array"),
+        pytest.param("null", id="null"),
+    ],
+)
+def test_the_codec_refuses_anything_that_is_not_a_json_array(text: str) -> None:
+    """§8:171: the column is `[]` or an array of words — a shorter read would be a guess."""
+    with pytest.raises(ValueError, match="assumptions"):
+        decode_assumptions(text)
+
+
+def test_the_codec_refuses_an_unknown_assumption_word() -> None:
+    """An assumption this engine cannot name is not evidence it may silently drop."""
+    with pytest.raises(ValueError, match="not an accounting assumption"):
+        decode_assumptions('["assumed_pue", "assumed_ppd"]')
+
+
+def test_the_codec_refuses_a_non_string_element() -> None:
+    """A code — `1`, `true` — is not a word: §8:171's vocabulary is the enum's, not a number."""
+    with pytest.raises(ValueError, match="are words"):
+        decode_assumptions("[1]")
+
+
+def test_the_codec_refuses_the_same_assumption_twice() -> None:
+    """Stating one twice adds nothing, so reading it back as two would inflate the record."""
+    with pytest.raises(ValueError, match="twice"):
+        decode_assumptions('["assumed_pue", "assumed_pue"]')
+
+
+# --- the record a store accepts: one posting, written once (§8:166) ------------------
+
+
+def _record_line(
+    *,
+    role: AccountRole = AccountRole.CLIENTES,
+    line_key: str = "total",
+    ordinal: int = 0,
+    account: str | None = "105-001",
+) -> JournalLineRecord:
+    return JournalLineRecord(
+        account_role=role,
+        line_key=line_key,
+        ordinal=ordinal,
+        side=LineSide.DEBE,
+        amount=_amount("116.00"),
+        resolved_account=account,
+    )
+
+
+def _record(
+    *,
+    posting_state: PostingState = PostingState.POSTED,
+    lines: tuple[JournalLineRecord, ...] | None = None,
+    **overrides: object,
+) -> JournalEntryRecord:
+    base: dict[str, object] = {
+        "entry_key": _entry().fingerprint(MAPPING_VERSION).canonical(),
+        "contributor_rfc": RFC,
+        "source_uuid": UUID,
+        "source_hash": SOURCE_HASH,
+        "rule_id": RULE_ID,
+        "rule_version": RULE_VERSION,
+        "mapping_version": MAPPING_VERSION,
+        "policy_version": POLICY_VERSION,
+        "posting_state": posting_state,
+        "entry_date": ENTRY_DATE,
+        "recorded_at": RECORDED_AT,
+        "lines": (_record_line(),) if lines is None else lines,
+    }
+    base.update(overrides)
+    return JournalEntryRecord(**base)  # type: ignore[arg-type]
+
+
+def test_a_record_keeps_the_key_and_every_version_of_its_decision() -> None:
+    """§8:194/§8:159: the key and the versions that shaped the posting travel with it."""
+    record = _record(assumptions=(AccountingAssumption.ASSUMED_PUE,))
+    assert record.entry_key == _entry().fingerprint(MAPPING_VERSION).canonical()
+    assert (record.rule_id, record.rule_version) == (RULE_ID, RULE_VERSION)
+    assert record.mapping_version == MAPPING_VERSION
+    assert record.policy_version == POLICY_VERSION
+    assert record.assumptions == (AccountingAssumption.ASSUMED_PUE,)
+    assert record.recorded_at == RECORDED_AT
+
+
+def test_a_posted_record_resolves_every_leg() -> None:
+    """§8:159/§8a:207: `POSTED` means the mapping resolved the entry — so no leg is NULL.
+
+    The refusal is an *internal* contradiction, not a review case: the validator never
+    produces such a decision, so building the record is already a writer bug. Refusing it
+    here is what makes the rule unbypassable — both stores accept only this aggregate.
+    """
+    with pytest.raises(ValueError, match="resolves every leg"):
+        _record(
+            posting_state=PostingState.POSTED,
+            lines=(_record_line(), _record_line(line_key="iva", ordinal=1, account=None)),
+        )
+
+
+def test_a_posted_record_needs_at_least_one_leg() -> None:
+    """§8:159: `POSTED` is "the entry it posted, with its legs" — a word without a fact."""
+    with pytest.raises(ValueError, match="with its legs"):
+        _record(posting_state=PostingState.POSTED, lines=())
+
+
+def test_a_proposed_record_keeps_the_leg_it_could_not_resolve() -> None:
+    """§8:167: a refusal is auditable evidence — the unmapped role is stored as ``None``.
+
+    `None` is the *truthful* value ("no account was chosen"), and that is exactly why a
+    `POSTED` record may not contain it: one field carries both "not resolved yet" and the
+    absence of a resolution, and only the posting state says which one is meant.
+    """
+    record = _record(posting_state=PostingState.PROPOSED, lines=(_record_line(account=None),))
+    assert record.lines[0].resolved_account is None
+
+
+def test_a_skipped_record_carries_no_legs() -> None:
+    """§8:161: a skip posts nothing, so a leg on it would be a posting by another name."""
+    assert _record(posting_state=PostingState.SKIPPED, lines=()).lines == ()
+    with pytest.raises(ValueError, match="carries no legs"):
+        _record(posting_state=PostingState.SKIPPED)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"entry_key": "  "}, id="blank-key"),
+        pytest.param({"source_hash": ""}, id="blank-source-hash"),
+        pytest.param({"rule_id": ""}, id="blank-rule-id"),
+        pytest.param({"rule_version": ""}, id="blank-rule-version"),
+        pytest.param({"mapping_version": ""}, id="blank-mapping-version"),
+        pytest.param({"policy_version": " "}, id="blank-policy-version"),
+    ],
+)
+def test_a_record_refuses_a_blank_identity_field(overrides: dict[str, object]) -> None:
+    """§8:159/§8:194: the key and the versions that shaped it are not optional prose."""
+    with pytest.raises(ValueError):
+        _record(**overrides)
+
+
+def test_a_record_refuses_two_legs_at_one_position_or_under_one_key() -> None:
+    """A leg is identified by its `line_key` (§8:194) and sits at exactly one position."""
+    with pytest.raises(ValueError, match="line_key"):
+        _record(lines=(_record_line(), _record_line(ordinal=1)))
+    with pytest.raises(ValueError, match="one position"):
+        _record(lines=(_record_line(), _record_line(line_key="iva")))
+
+
+def test_a_record_refuses_the_same_assumption_twice() -> None:
+    """As on the entry: stating one assumption twice adds nothing (§8:171)."""
+    with pytest.raises(ValueError, match="twice"):
+        _record(assumptions=(AccountingAssumption.ASSUMED_PUE,) * 2)
+
+
+@pytest.mark.parametrize(
+    "line_kwargs",
+    [
+        pytest.param({"line_key": ""}, id="empty-key"),
+        pytest.param({"ordinal": -1}, id="negative-ordinal"),
+        pytest.param({"account": "  "}, id="blank-account"),
+    ],
+)
+def test_a_record_line_refuses_an_impossible_leg(line_kwargs: dict[str, object]) -> None:
+    """A blank account is not a resolution: §8a:207 answers with an account or with `None`."""
+    with pytest.raises(ValueError):
+        _record_line(**line_kwargs)
+
+
+def test_the_record_is_frozen_because_a_posting_is_written_once() -> None:
+    """§8:166: an assigned posting state is not a field anyone may assign again."""
+    record = _record()
+    with pytest.raises(FrozenInstanceError):
+        record.posting_state = PostingState.PROPOSED  # type: ignore[misc]

@@ -337,7 +337,7 @@ def test_a_v2_database_upgrades_to_the_current_version_and_keeps_its_profile_row
 
     init_schema(conn)
 
-    assert _user_version(conn) == SCHEMA_VERSION == 5
+    assert _user_version(conn) == SCHEMA_VERSION == 6
     assert "codigo_postal" in _columns(conn, "contributor_profiles")
     assert _table_names(conn) >= M2E_TABLES
     stored = SqliteContributorProfileRepository(conn).latest(RFC)

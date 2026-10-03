@@ -18,13 +18,21 @@ evidence — "this clearing leg is the SAT's PUE presumption, not verified payme
 inside a ``line_key``: the key is §8:194's structural identity for a leg, and an
 assumption that may later be promoted to ``SUPPORTED_BY_BANK`` must not be able to
 redefine it.
+
+The module's second half is what the ledger *writes down*: :func:`encode_assumptions`
+and :func:`decode_assumptions`, the one codec for that evidence (``assumptions`` is
+persisted TEXT, §8:171), and the frozen :class:`JournalEntryRecord` /
+:class:`JournalLineRecord` aggregate a ``JournalEntryStore`` accepts. The records live
+here, beside the model they project, because the invariant that makes a posting
+trustworthy — ``POSTED`` resolves every leg (§8:159) — is a property of the decision,
+not of an adapter, so it must be enforced in the one type both stores take.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
@@ -219,3 +227,160 @@ class ProposedJournalEntry:
             line_key=line_key,
             mapping_version=mapping_version,
         )
+
+
+def encode_assumptions(assumptions: tuple[AccountingAssumption, ...]) -> str:
+    """§8:171's evidence as the persisted TEXT: a JSON array of the stable words.
+
+    ``()`` encodes to ``"[]"``, which is the domain's own value for "presumed nothing",
+    so an entry that presumed nothing needs no special case. The tuple's order is
+    reproduced rather than sorted — the rule's order is what it stated — and the encoding
+    is compact, so the same evidence always produces the same text. A record of what was
+    presumed may not depend on how a serializer happened to format it.
+    """
+    return json.dumps(
+        [item.value for item in assumptions],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def decode_assumptions(text: str) -> tuple[AccountingAssumption, ...]:
+    """The inverse of :func:`encode_assumptions`, and it fails closed.
+
+    A word this engine does not know, a duplicate, a non-string element or anything that
+    is not a JSON array is a ``ValueError``. Nothing is dropped, deduplicated or
+    truncated on the way in: an entry whose assumptions cannot be read is *not* the entry
+    that was written, so reading it as a lesser one would forge evidence. Decoding
+    something the codec never wrote is a bug to fix, never a case to tolerate.
+    """
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"assumptions are not valid JSON: {text!r}") from error
+    if not isinstance(decoded, list):
+        raise ValueError(f"assumptions are a JSON array of words, got {text!r}")
+    words: list[AccountingAssumption] = []
+    for item in decoded:
+        if not isinstance(item, str):
+            raise ValueError(f"assumptions are words, got {item!r} in {text!r}")
+        try:
+            words.append(AccountingAssumption(item))
+        except ValueError as error:
+            raise ValueError(f"{item!r} is not an accounting assumption: {text!r}") from error
+    if len(set(words)) != len(words):
+        raise ValueError(f"an assumption stated twice adds nothing: {text!r}")
+    return tuple(words)
+
+
+@dataclass(frozen=True)
+class JournalLineRecord:
+    """One leg as it was written: its role, its position, and the account it was posted to.
+
+    ``resolved_account`` is the §8a:207 resolution the leg was posted to *at posting
+    time*, recorded so the line stays explainable without the client's current YAML. It
+    is ``None`` for a leg nothing was posted to: an unmapped role on a refused,
+    ``PROPOSED`` entry is the audit evidence §8:167 asks for, and ``None`` is the honest
+    value for "no account was chosen" — never a placeholder for an account that was.
+    ``ordinal`` is the position the rule proposed the leg in: §8:194's ``line_key``
+    identifies the leg, the ordinal keeps the entry's order.
+    """
+
+    account_role: AccountRole
+    line_key: str
+    ordinal: int
+    side: LineSide
+    amount: NormalizedAmount
+    resolved_account: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.line_key:
+            raise ValueError(
+                "a journal line needs a non-empty line_key: §8:194 identifies the lines of"
+                " one entry by it, and the empty key belongs to the entry itself"
+            )
+        if self.ordinal < 0:
+            raise ValueError(f"an ordinal is a position, never negative: {self.ordinal}")
+        if self.resolved_account is not None and not self.resolved_account.strip():
+            raise ValueError(
+                "a blank account is not a resolution: §8a:207 resolves a role to an"
+                " account or to nothing at all (None)"
+            )
+
+
+@dataclass(frozen=True)
+class JournalEntryRecord:
+    """One decision as the durable fact: what §8:166 assigns once and never rewrites.
+
+    A record is the projection of a ``PostingDecision`` (built by
+    ``PostingDecision.to_record``), so it is always a decision the
+    ``PostingEligibilityValidator`` stood behind, never a hand-assembled claim about one.
+    It carries what a reader needs to explain the posting without re-reading the source
+    or today's mapping: §8:194's ``entry_key`` *and* the fields it was computed from, the
+    rule/policy/mapping versions §8:159 records, §8:171's ``assumptions``, and each leg's
+    posting-time account (§8a:207).
+
+    The invariant this type exists for is the one no field can express: **``POSTED``
+    resolves every leg** (§8:159's "deterministic account mapping"). An entry that says
+    ``POSTED`` and leaves a leg without an account contradicts its own verdict. That is a
+    *writer* bug, not a document-level review case, so it is refused here — in the one
+    aggregate both stores accept — and no adapter can bypass it. The other states are
+    free to be incomplete, truthfully: a ``PROPOSED`` leg may carry ``None`` precisely so
+    the unmapped role a human must resolve stays auditable, and a ``SKIPPED`` entry has
+    no legs at all (§8:161).
+    """
+
+    entry_key: str
+    contributor_rfc: Rfc
+    source_uuid: Uuid
+    source_hash: str
+    rule_id: str
+    rule_version: str
+    mapping_version: str
+    policy_version: str
+    posting_state: PostingState
+    entry_date: date
+    recorded_at: datetime
+    assumptions: tuple[AccountingAssumption, ...] = ()
+    lines: tuple[JournalLineRecord, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.entry_key.strip():
+            raise ValueError(
+                "an entry is keyed by §8:194's fingerprint, so an empty entry_key has no"
+                " identity to append under"
+            )
+        if not self.source_hash.strip():
+            raise ValueError("§8:159: source_hash is part of every posting's identity")
+        if not self.rule_id.strip() or not self.rule_version.strip():
+            raise ValueError("§8:194: a posting is keyed by rule_id + rule_version")
+        if not self.mapping_version.strip():
+            raise ValueError("§8:194: a posting is keyed by mapping_version")
+        if not self.policy_version.strip():
+            raise ValueError("§8:159: the policy version is recorded with every posting")
+        if len(set(self.assumptions)) != len(self.assumptions):
+            raise ValueError(
+                "an assumption is evidence about the entry, so stating one twice adds"
+                f" nothing: {[item.value for item in self.assumptions]}"
+            )
+        keys = [line.line_key for line in self.lines]
+        if len(set(keys)) != len(keys):
+            raise ValueError(
+                f"line_key identifies a line within its entry (§8:194): {sorted(set(keys))}"
+            )
+        ordinals = [line.ordinal for line in self.lines]
+        if len(set(ordinals)) != len(ordinals):
+            raise ValueError(f"a leg has one position: {sorted(set(ordinals))}")
+        if self.posting_state is PostingState.SKIPPED and self.lines:
+            raise ValueError(
+                f"§8:161: a skip posts nothing, so it carries no legs: {len(self.lines)} given"
+            )
+        if self.posting_state is PostingState.POSTED:
+            if not self.lines:
+                raise ValueError("§8:159: POSTED needs the entry it posted, with its legs")
+            unresolved = [line.line_key for line in self.lines if line.resolved_account is None]
+            if unresolved:
+                raise ValueError(
+                    "§8:159: a POSTED entry resolves every leg — §8a:207's mapping is a"
+                    f" precondition, not a hope; unresolved: {unresolved}"
+                )

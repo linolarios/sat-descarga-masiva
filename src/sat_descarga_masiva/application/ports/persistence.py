@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
+from sat_descarga_masiva.contabilidad.journal import JournalEntryRecord
 from sat_descarga_masiva.domain.enums.catalog import Direction, ServiceType
 from sat_descarga_masiva.domain.model.contributor import ContributorProfileRecord
 from sat_descarga_masiva.domain.model.csf import CsfArtifact
@@ -95,6 +96,32 @@ class FiscalEventStore(Protocol):
 
     def append(self, event: FiscalEvent) -> None: ...
     def for_uuid(self, uuid: Uuid) -> tuple[FiscalEvent, ...]: ...
+
+
+class JournalEntryStore(Protocol):
+    """M3-owned `journal_entries`/`journal_lines`/`posting_snapshot`: the durable posting.
+
+    The three tables are one fact — the entry, its legs, and the evidence recorded with it
+    (§8:159's rule/policy/mapping versions) — so ``append`` writes all three or none and a
+    reader never sees half a posting. Append-only, like the ledger it belongs to: the
+    identity is §8:194's ``entry_key`` (the entry's ``PostingFingerprint``), so re-appending
+    the identical record is an idempotent no-op while a *different* record under the same
+    key raises ``ImmutableRecordConflict`` — a posting state is assigned once (§8:166) and
+    never rewritten, not even by a correction (that is a new, compensating record).
+
+    The POSTED-resolves-every-leg invariant (§8:159) belongs to ``JournalEntryRecord``
+    itself, so no adapter is ever handed a contradictory record and none of them has to
+    re-state the rule; ``record`` is therefore accepted by every implementation as-is.
+
+    ``recorded_at`` is the moment the decision became durable, and is stored with it: the
+    posting is what was decided *then*, not what today's mapping would decide.
+    """
+
+    def append(self, record: JournalEntryRecord) -> None: ...
+    def get(self, entry_key: str) -> JournalEntryRecord | None: ...
+    def for_source(
+        self, contributor_rfc: Rfc, source_uuid: Uuid
+    ) -> tuple[JournalEntryRecord, ...]: ...
 
 
 class ContributorProfileRepository(Protocol):
