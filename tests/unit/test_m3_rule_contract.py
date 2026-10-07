@@ -112,14 +112,23 @@ def test_the_context_is_exactly_the_books_the_document_the_perspective_and_class
 
     ``classification`` is the one *derived* carrier — §8a:207's resolved
     ``ClaveProdServ → category → role`` answer, resolved before the rule runs — so the
-    receiving rules still read nothing but their context.
+    receiving rules still read nothing but their context. ``posted_source_uuids`` is the other,
+    and the reason it is a field rather than a lookup: §8:192's REP rows must know which related
+    documents the ledger already holds as POSTED, and a rule that could read persistence for
+    itself would stop being a pure function of its context.
     """
     assert [field.name for field in fields(PostingContext)] == [
         "contributor_rfc",
         "document",
         "perspective",
         "classification",
+        "posted_source_uuids",
     ]
+
+
+def test_the_context_defaults_to_an_empty_ledger() -> None:
+    """A rule that needs no presence reads the same context every other rule does (§8:194)."""
+    assert _context().posted_source_uuids == frozenset()
 
 
 # --- the third answer: a rule that cannot compute says so (§8:173) --------------------

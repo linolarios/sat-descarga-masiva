@@ -19,6 +19,13 @@ The sequence, and why each step sits where it does:
 - **the mapping is resolved once.** §8a:207's chart is loaded once per document and handed to
   both the classification and the validator, so a decision is versioned by exactly one mapping
   (§8:194) rather than by two reads that could disagree.
+- **the ledger is read, once, for the one rule that needs it.** §8:192's REP rows have to know
+  whether each related document's original was ever booked, and a rule may read nothing but its
+  context — so the *presence* is resolved here, through the store's own reader, and carried as
+  `PostingContext.posted_source_uuids`. Only a `POSTED` record counts: a `PROPOSED` refusal or a
+  `SKIPPED` row moved nothing, so a collection against it would have no receivable to settle. The
+  set is built per document and only when the document actually states related documents, so an
+  ordinary comprobante costs no query at all.
 - **classification happens only where it means something.** §8a:207's
   ``ClaveProdServ → AccountingCategory`` answer is a precondition of the *received* rules
   (4.3/4.4), whose base role §8's row does not fix. An emitted document or a non-``I``
@@ -61,7 +68,7 @@ from sat_descarga_masiva.domain.errors import UnbalancedJournalCommit
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument
 from sat_descarga_masiva.domain.model.perspective import Perspective
 from sat_descarga_masiva.domain.model.review import ReviewFlags
-from sat_descarga_masiva.domain.model.value_objects import Rfc
+from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
 from sat_descarga_masiva.fiscal.projection import ProcessedDocument
 
 
@@ -110,7 +117,7 @@ class ExecuteAccountingUseCase:
         document = _projectable_document(processed)
         merged = replace(document, review_flags=_merged_review_flags(processed, document))
         mapping = self._mapping.mapping_for(contributor_rfc)
-        context = _posting_context(processed, merged, contributor_rfc, mapping)
+        context = _posting_context(processed, merged, contributor_rfc, mapping, self._store)
         decision = self._validator.decide(context, propose(context), mapping=mapping)
         if decision.entry is None:
             return AccountingResult(decision=decision)
@@ -153,6 +160,7 @@ def _posting_context(
     document: FiscalDocument,
     contributor_rfc: Rfc,
     mapping: AccountMapping,
+    store: JournalEntryStore,
 ) -> PostingContext:
     """The engine's view of one document: whose books, which document, as whom (§8).
 
@@ -164,6 +172,44 @@ def _posting_context(
         document=document,
         perspective=processed.perspective,
         classification=_classification_for(processed, document, mapping),
+        posted_source_uuids=_posted_source_uuids(document, contributor_rfc, store),
+    )
+
+
+def _posted_source_uuids(
+    document: FiscalDocument, contributor_rfc: Rfc, store: JournalEntryStore
+) -> frozenset[Uuid]:
+    """Which of the document's related documents the client's own books already hold (§8:192).
+
+    A REP's related documents are *other* CFDI UUIDs, and whether one of them was ever booked is a
+    ledger fact — not something the REP states and not something a rule may look up for itself.
+    So the answer is assembled here, once per document, from the store's reader:
+
+    - **only `POSTED` counts.** `PROPOSED` is a refusal that moved nothing and `SKIPPED` is a
+      document deliberately outside accounting scope, so neither is a receivable or a payable the
+      payment could settle; treating either as presence would book a settlement against a booking
+      that never existed.
+    - **per UUID, deduplicated.** A related document may appear under several payments (each its own
+      partialidad), and presence is a property of the *document*, so the reader is asked once per
+      distinct UUID, in the order the document states them (deterministic, and a repeated UUID does
+      not become a second query).
+    - **nothing is asked when there is nothing to ask about.** A document with no `pago20`
+      complemento gets the empty frozenset and costs no query, which keeps this seam invisible to
+      every rule that does not need it (§8:179–182).
+    """
+    pagos = document.pagos
+    if pagos is None:
+        return frozenset()
+    related = dict.fromkeys(
+        docto.uuid for pago in pagos.pagos for docto in pago.doctos_relacionados
+    )
+    return frozenset(
+        uuid
+        for uuid in related
+        if any(
+            record.posting_state is PostingState.POSTED
+            for record in store.for_source(contributor_rfc, uuid)
+        )
     )
 
 

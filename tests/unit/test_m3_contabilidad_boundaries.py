@@ -390,3 +390,30 @@ def test_a25_the_new_stage_depends_inward_only() -> None:
         "sat_descarga_masiva.domain.model.value_objects",
         "sat_descarga_masiva.fiscal.projection",
     ]
+
+
+def test_the_reposting_rule_module_reads_the_engine_and_the_domain_only() -> None:
+    """§4/§8: a rule is *pure over its context*, which is a dependency claim, not a style one.
+
+    `reposting.py` computes §8:192's REP rows, so it must be unable to do what the design forbids:
+    it may not import `posting.py` (the engine's registry appends its rows, not the other way
+    round), it may not reach for a store to learn whether an original was posted — that presence
+    arrives as `PostingContext.posted_source_uuids` — and it may not name an account, since §8a:207
+    keeps every account number in the mapping. Its imports are therefore exactly: the engine's own
+    contract, journal vocabulary and roles, plus the domain model it reads.
+    """
+    modules = _imported_modules(_package_sources()["rules/reposting.py"], filename="reposting.py")
+    assert not _forbidden_modules(modules)
+    assert not _external_modules(modules)
+    assert sorted(module for module in modules if module.startswith("sat_descarga_masiva")) == [
+        "sat_descarga_masiva.contabilidad.journal",
+        "sat_descarga_masiva.contabilidad.roles",
+        "sat_descarga_masiva.contabilidad.rules.contract",
+        "sat_descarga_masiva.domain.enums.comprobante",
+        "sat_descarga_masiva.domain.model.fiscal_document",
+        "sat_descarga_masiva.domain.model.perspective",
+        "sat_descarga_masiva.domain.model.review",
+        "sat_descarga_masiva.domain.model.value_objects",
+        "sat_descarga_masiva.domain.policy.money",
+    ]
+    assert "sat_descarga_masiva.contabilidad.rules.posting" not in modules

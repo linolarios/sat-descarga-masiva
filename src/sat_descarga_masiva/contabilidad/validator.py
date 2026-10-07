@@ -52,6 +52,7 @@ from sat_descarga_masiva.contabilidad.journal import (
 from sat_descarga_masiva.contabilidad.roles import AccountRole
 from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, ReviewRequest, Skip
 from sat_descarga_masiva.contabilidad.rules.scope import OUT_OF_SCOPE_RULES
+from sat_descarga_masiva.domain.enums.comprobante import TipoComprobante
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocumentStatus
 from sat_descarga_masiva.domain.model.review import ReviewFlag, ReviewFlagType
 
@@ -388,8 +389,16 @@ class PostingEligibilityValidator:
         # 4. deterministic FX valuation (§8:193). Only the national currency is valuated without
         #    an FX decision; a foreign-currency document awaits the resolution §8:193 defines
         #    (and the ⚠ contador ruling behind it), so it is never valued at a rate the engine
-        #    picked on its own.
-        if document.moneda.upper() != _NATIONAL_CURRENCY:
+        #    picked on its own. A REP is exempt from this *header* test and only from it: a `P`
+        #    comprobante's header carries no currency of its own (§8:192 gives every payment its
+        #    own `MonedaP`/`MonedaDR`), so §8:193's resolution for a REP belongs to the payment's
+        #    own facts — where rule 4.5a/4.5b refuses to value them and flags
+        #    `FX_DIFFERENCE_UNCONFIRMED` instead. Testing the header here would refuse every REP
+        #    for a reason that is not about the currency the entry is valued in.
+        if (
+            document.moneda.upper() != _NATIONAL_CURRENCY
+            and TipoComprobante.of(document.tipo) is not TipoComprobante.PAGO
+        ):
             flags.append(
                 _flag(
                     ReviewFlagType.AMBIGUOUS_FX,

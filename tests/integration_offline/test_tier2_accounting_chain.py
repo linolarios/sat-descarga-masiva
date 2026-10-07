@@ -37,8 +37,13 @@ from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocumentStatu
 from sat_descarga_masiva.domain.model.raw_cfd import (
     RawCfd,
     RawConcepto,
+    RawDoctoRelacionado,
     RawImpuestos,
+    RawImpuestosDR,
+    RawPago,
+    RawPagos20,
     RawTraslado,
+    RawTrasladoDR,
 )
 from sat_descarga_masiva.domain.model.review import ReviewFlagType
 from sat_descarga_masiva.domain.model.signature import SignatureOutcome, SignatureVerdict
@@ -62,6 +67,8 @@ VERIFIED = SignatureVerdict(SignatureOutcome.VALID, "the emisor sello and the TF
 RECORDED_AT = datetime(2026, 2, 1, 9, 30, tzinfo=UTC)
 #: A ClaveProdServ the committed chart classifies as `gasto` (§8a:207).
 GASTO = "84111506"
+#: The CFDI a REP settles — a UUID of its own, distinct from the REP's TFD UUID (§8:194).
+SETTLED = Uuid("111E4567-E89B-12D3-A456-426614174000")
 #: §8:159's condition 1 as this tier supplies it: a *resolved* VIGENTE source state. The metadata
 #: join that resolves it (§6:123) is a different stage; the projection's own value is `UNKNOWN`.
 VIGENTE = FiscalDocumentStatus.VIGENTE
@@ -126,6 +133,59 @@ def _raw(**overrides: object) -> RawCfd:
         "subtotal": "100.00",
         "fecha": FECHA,
         "metodo_pago": "PUE",
+    }
+    base.update(overrides)
+    return RawCfd(**base)  # type: ignore[arg-type]
+
+
+def _rep_raw(**overrides: object) -> RawCfd:
+    """A coherent MXN REP as *source* facts: one payment collecting one issued invoice (§8:192)."""
+    base: dict[str, object] = {
+        "tipo": "P",
+        "version": "4.0",
+        "moneda": "MXN",
+        "tipo_cambio": None,
+        "emisor_rfc": CLIENT.value,
+        "receptor_rfc": OTHER.value,
+        "conceptos": (RawConcepto(GASTO, "1", "0.00", "0.00", None),),
+        "impuestos": RawImpuestos(),
+        "total": "0.00",
+        "subtotal": "0.00",
+        "uuid": TFD_UUID.value,
+        "fecha": FECHA,
+        "metodo_pago": None,
+        "pagos": RawPagos20(
+            version="2.0",
+            pagos=(
+                RawPago(
+                    fecha_pago="2024-06-01T09:00:00",
+                    forma_de_pago_p="03",
+                    moneda_p="MXN",
+                    monto="116.00",
+                    doctos_relacionados=(
+                        RawDoctoRelacionado(
+                            id_documento=SETTLED.value,
+                            moneda_dr="MXN",
+                            num_parcialidad="1",
+                            imp_saldo_ant="116.00",
+                            imp_pagado="116.00",
+                            objeto_imp_dr="01",
+                            imp_saldo_insoluto="0.00",
+                            impuestos_dr=RawImpuestosDR(
+                                traslados_dr=(
+                                    RawTrasladoDR(
+                                        base_dr="100.00",
+                                        impuesto_dr="002",
+                                        tipo_factor_dr="Tasa",
+                                        importe_dr="16.00",
+                                    ),
+                                )
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
     }
     base.update(overrides)
     return RawCfd(**base)  # type: ignore[arg-type]
@@ -286,3 +346,51 @@ def test_the_ledger_row_explains_itself_without_todays_mapping() -> None:
     assert record.entry_key == entry.fingerprint(record.mapping_version).canonical()
     assert record.policy_version  # §8:159 records it with every posting
     assert record.entry_date.isoformat() == "2024-05-15"  # §8a:209: the document's own Fecha
+
+
+def test_a_rep_reclassifies_a_collection_the_ledger_already_holds() -> None:
+    """§8:184/§8:192: a REP adds no role — it settles the receivable an issued invoice created.
+
+    The chain is exercised twice, production code all the way. First the REP is refused, because
+    the client's books hold no `POSTED` original for the CFDI it settles and §8:192's presence is a
+    *ledger* fact the rule cannot read for itself. Then the issued PPD invoice is posted by the very
+    same chain, so the original booking now exists, and the REP that collects it reclassifies
+    `CLIENTES` and its IVA — the accounts, and only the accounts, the committed chart names.
+    """
+    refused = _chain()
+    unbooked = refused.execute(_projected(_rep_raw()))
+    assert unbooked.decision.posting_state is PostingState.PROPOSED
+    assert ReviewFlagType.MISSING_REP_ORIGINAL in [
+        flag.flag_type for flag in unbooked.decision.review_flags
+    ]
+
+    chain = _chain()
+    invoice = chain.execute(
+        _projected(
+            _raw(
+                emisor_rfc=CLIENT.value,
+                receptor_rfc=OTHER.value,
+                metodo_pago="PPD",
+                uuid=SETTLED.value,
+            )
+        )
+    )
+    assert invoice.decision.posting_state is PostingState.POSTED  # the receivable now exists
+
+    result = chain.execute(_projected(_rep_raw()))
+    assert result.decision.posting_state is PostingState.POSTED
+    record = result.record
+    assert record is not None
+    assert record.rule_id == "4.5a"
+    assert record.mapping_version == _declared_mapping_version()
+    assert [
+        (line.account_role, line.side.value, str(line.amount.amount), line.resolved_account)
+        for line in record.lines
+    ] == [
+        (AccountRole.CLEARING, "debe", "116.00", "102-099"),
+        (AccountRole.CLIENTES, "haber", "116.00", "105-001"),
+        (AccountRole.IVA_TRASLADADO_NO_COBRADO, "debe", "16.00", "209-001"),
+        (AccountRole.IVA_TRASLADADO_COBRADO, "haber", "16.00", "208-001"),
+    ]
+    assert record.recorded_at == RECORDED_AT
+    assert chain.appended() == (record,)

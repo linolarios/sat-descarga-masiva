@@ -34,7 +34,9 @@ a document that cannot be dated or identified is refused before anything is comp
 posts unless `Total == base + IVA` holds, which is what makes the proposed entry balance.
 
 `propose(request)` is the engine's one door per document — skip, propose, or review
-(§8:161/173) — so the pipeline asks one question and gets one of the three answers.
+(§8:161/173) — so the pipeline asks one question and gets one of the three answers. The rows it
+walks are this module's `I` rows plus §8's REP rows from `reposting.py` (4.5a/4.5b), in one
+ordered tuple: a `P` comprobante is claimed by its own row and by nothing here.
 """
 
 from __future__ import annotations
@@ -55,7 +57,17 @@ from sat_descarga_masiva.contabilidad.journal import (
     ProposedJournalEntry,
 )
 from sat_descarga_masiva.contabilidad.roles import AccountRole
-from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, ReviewRequest, Skip
+from sat_descarga_masiva.contabilidad.rules.contract import (
+    _PRECONDITION_DETAIL,
+    PostingContext,
+    Proposal,
+    ReviewRequest,
+    RuleRow,
+    _flag,
+    _recordability_flags,
+    _review,
+)
+from sat_descarga_masiva.contabilidad.rules.reposting import REP_ROWS
 from sat_descarga_masiva.contabilidad.rules.scope import out_of_scope
 from sat_descarga_masiva.domain.enums.comprobante import TipoComprobante
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument
@@ -106,22 +118,10 @@ _REFUSAL_FLAGS: Mapping[ClassificationRefusalKind, ReviewFlagType] = {
     ClassificationRefusalKind.MIXED_CATEGORIES: ReviewFlagType.UNSUPPORTED_RULE,
 }
 
-#: What a rule (and the selector below) may answer with (§8:173).
-Proposal = ProposedJournalEntry | Skip | ReviewRequest
 
-#: Detail sentence for every "the document is not what this rule can book" refusal — the
-#: machine-readable part is the flag's *type*, this is the sentence a human reads in the log
-#: (§8:167), so a reworded sentence can never change a decision.
-_PRECONDITION_DETAIL = (
-    "the rule's source preconditions are not met, so no entry is proposed rather than a"
-    " partial one (§8:173)"
-)
-
-
-def _flag(flag_type: ReviewFlagType, reason: str) -> ReviewFlag:
-    return ReviewFlag(flag_type=flag_type, reason=reason)
-
-
+#: What a rule (and the selector below) may answer with (§8:173). Declared in `contract.py`,
+#: beside the refusal helper and the `RuleRow` protocol, because `reposting.py` answers with the
+#: same three words: a rule module declares rows and computes legs, and shares the rest.
 @dataclass(frozen=True)
 class PostingRule:
     """One row of §8's table: the document shape it books, where the money lands, and how.
@@ -140,7 +140,7 @@ class PostingRule:
     rule_version: str
     tipo: TipoComprobante
     perspective: Perspective
-    metodo_pago: str
+    metodo_pago: str | None
     money_role: AccountRole
     money_key: str
     iva_role: AccountRole
@@ -148,12 +148,18 @@ class PostingRule:
     assumptions: tuple[AccountingAssumption, ...] = ()
 
     def claims(self, request: PostingContext) -> bool:
-        """True when §8's row is the document's: its type, its perspective and its method."""
+        """True when §8's row is the document's: its type, its perspective and its method.
+
+        ``metodo_pago`` is compared, not normalized, because §8:179–182 choose their row by the
+        document's own word (§8:171's whole reason for refusing an absent one) — but the wildcard
+        ``None`` means *any* method, which is how a row for a comprobante that carries no header
+        ``MetodoPago`` at all is expressed without inventing one on the document.
+        """
         document = request.document
         return (
             TipoComprobante.of(document.tipo) is self.tipo
             and request.perspective is self.perspective
-            and document.metodo_pago == self.metodo_pago
+            and (self.metodo_pago is None or document.metodo_pago == self.metodo_pago)
         )
 
 
@@ -411,59 +417,6 @@ def _purchase_entry(
     )
 
 
-def _review(
-    request: PostingContext,
-    row: PostingRule,
-    *,
-    flags: tuple[ReviewFlag, ...],
-    detail: str,
-) -> ReviewRequest:
-    """A refusal keyed as an entry when the document can be (§8:169/194), else on the document.
-
-    A review fact is recorded against an entry's fingerprint, so it needs the same provenance a
-    posting needs: contributor, source, rule and version — and a date (§8a:209) and a TFD UUID
-    (§8:194). When either is missing there is no entry to key, and inventing one would be worse
-    than flagging the document itself (§8:167); so ``entry`` stays ``None``.
-    """
-    document = request.document
-    entry_date, source_uuid = document.fecha, document.source_uuid
-    if entry_date is None or source_uuid is None:
-        return ReviewRequest(flags=flags, detail=detail)
-    return ReviewRequest(
-        entry=ProposedJournalEntry(
-            rule_id=row.rule_id,
-            rule_version=row.rule_version,
-            contributor_rfc=request.contributor_rfc,
-            source_uuid=source_uuid,
-            source_hash=document.source_hash,
-            entry_date=entry_date,
-            lines=(),
-        ),
-        flags=flags,
-        detail=detail,
-    )
-
-
-def _recordability_flags(document: FiscalDocument) -> tuple[ReviewFlag, ...]:
-    """Why an entry cannot be keyed: §8a:209's date and §8:194's TFD UUID, each its own reason."""
-    flags: list[ReviewFlag] = []
-    if document.fecha is None:
-        flags.append(
-            _flag(
-                ReviewFlagType.MISSING_SOURCE_FIELD,
-                "no Fecha: an entry must be dated by the document, never by 'today' (§8a:209)",
-            )
-        )
-    if document.source_uuid is None:
-        flags.append(
-            _flag(
-                ReviewFlagType.MISSING_POSTING_IDENTITY,
-                "no TFD UUID: §8:194 keys the entry by it, so there is nothing to record",
-            )
-        )
-    return tuple(flags)
-
-
 def _net_base(document: FiscalDocument) -> NormalizedAmount | None:
     """§8:175/191 + §8a:204: `base = SubTotal − Descuento` under M3's `discount_policy = net`.
 
@@ -577,6 +530,10 @@ def _unbookable_tax(document: FiscalDocument) -> ReviewFlag | None:
 #: what they claim, so selection is deterministic, and the tuple *is* the engine's registry of
 #: postable rules — the validator is wired with it (§8:159), so a rule id or version that is not
 #: here cannot post. Each rule function books its own row and nothing else.
+#:
+#: §8's REP rows (4.5a/4.5b) are built in `reposting.py` beside the calculation they share — one
+#: entry per comprobante, one set of legs per related document — and appended here so there is
+#: exactly one ordered registry and therefore exactly one selection order.
 _RULE_4_1 = PostingRule(
     rule_id=RULE_4_1,
     rule_version=RULE_4_1_VERSION,
@@ -627,7 +584,7 @@ _RULE_4_4 = PostingRule(
     propose=rule_4_4,
 )
 
-POSTING_RULES: tuple[PostingRule, ...] = (_RULE_4_1, _RULE_4_2, _RULE_4_3, _RULE_4_4)
+POSTING_RULES: tuple[RuleRow, ...] = (_RULE_4_1, _RULE_4_2, _RULE_4_3, _RULE_4_4, *REP_ROWS)
 
 #: The engine's registry as the validator is wired with it: ``rule_id`` → current version.
 SUPPORTED_RULES: dict[str, str] = {row.rule_id: row.rule_version for row in POSTING_RULES}

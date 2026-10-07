@@ -290,6 +290,32 @@ def test_a_foreign_currency_document_awaits_a_resolved_rate() -> None:
     assert _flag_types(decision) == [ReviewFlagType.AMBIGUOUS_FX]
 
 
+def test_a_rep_is_exempt_from_the_header_currency_condition() -> None:
+    """§8:192/§8:193: a `P` comprobante's header states no currency the entry is valued in.
+
+    A REP states its currency per payment (`MonedaP`/`MonedaDR`), so refusing the whole document
+    for its header would be a reason about a value nothing in the entry came from. Whether the
+    payments themselves can be valued is the *rule's* question — it flags
+    `FX_DIFFERENCE_UNCONFIRMED` and books no leg for an amount nobody valued — so the validator
+    must not pre-empt it here.
+    """
+    decision = _validator().decide(
+        _context(replace(_document(tipo="P"), moneda="USD", tipo_cambio=Decimal("17.5"))),
+        _proposal(),
+    )
+    assert _flag_types(decision) == []
+    assert decision.posting_state is PostingState.POSTED
+
+
+def test_the_header_currency_condition_still_refuses_every_other_type() -> None:
+    """The regression that keeps the exemption narrow: only `PAGO` skips condition 4 (§8:193)."""
+    for tipo in ("I", "E", "T", "N", "R", "X"):
+        decision = _validator().decide(
+            _context(replace(_document(tipo=tipo), moneda="USD")), _proposal()
+        )
+        assert ReviewFlagType.AMBIGUOUS_FX in _flag_types(decision), tipo
+
+
 # --- condition 5: valid Decimal amounts -----------------------------------------------
 
 

@@ -194,12 +194,11 @@ def test_the_out_of_scope_table_is_the_only_way_to_a_skip(
     [
         ("E", Perspective.EMITIDO),
         ("E", Perspective.RECIBIDO),
-        ("P", Perspective.EMITIDO),
-        ("P", Perspective.RECIBIDO),
         ("N", Perspective.EMITIDO),
         ("R", Perspective.EMITIDO),
         ("X", Perspective.EMITIDO),
         ("I", Perspective.UNDETERMINED),
+        ("P", Perspective.UNDETERMINED),
     ],
 )
 def test_an_unbuilt_row_is_reviewed_and_never_silently_skipped(
@@ -212,14 +211,43 @@ def test_an_unbuilt_row_is_reviewed_and_never_silently_skipped(
     assert _refused(proposal).entry is None
 
 
+# --- §8:184/185's P rows, selected by type and side alone ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "perspective,rule_id",
+    [
+        (Perspective.EMITIDO, "4.5a"),
+        (Perspective.RECIBIDO, "4.5b"),
+    ],
+)
+def test_a_pago_document_is_claimed_by_the_rep_row_of_its_side(
+    perspective: Perspective, rule_id: str
+) -> None:
+    """§8:184/185: a `P` comprobante is a REP row's, and the side is which one (§8:192).
+
+    The document here carries no `pago20` complemento, so the row that claims it says exactly that
+    — rather than the selector falling through to "no rule accounts tipo P yet".
+    """
+    proposal = propose(_context(tipo="P", perspective=perspective, metodo_pago=None))
+    refusal = _refused(proposal)
+    assert refusal.entry is not None
+    assert refusal.entry.rule_id == rule_id
+    assert _flag_types(proposal) == [ReviewFlagType.MISSING_SOURCE_FIELD]
+
+
 # --- the registry ----------------------------------------------------------------------
 
 
 def test_the_registry_holds_the_income_rows_for_both_sides() -> None:
-    """§8:175/181's I rows — EMITIDO 4.1/4.2 and RECIBIDO 4.3/4.4 — and the validator's wiring."""
-    assert {row.rule_id for row in POSTING_RULES} == {"4.1", "4.2", "4.3", "4.4"}
+    """§8:175/181's I rows and §8:184/185's two REP rows — one registry, one selection order.
+
+    The REP rows are the wildcard ``None``: §8:192 gives a `P` comprobante no header ``MetodoPago``
+    to select on, so the registry states that instead of a method the document never carries.
+    """
+    assert {row.rule_id for row in POSTING_RULES} == {"4.1", "4.2", "4.3", "4.4", "4.5a", "4.5b"}
     assert {row.rule_id: row.rule_version for row in POSTING_RULES} == SUPPORTED_RULES
-    assert {row.metodo_pago for row in POSTING_RULES} == {"PUE", "PPD"}
+    assert {str(row.metodo_pago) for row in POSTING_RULES} == {"PUE", "PPD", "None"}
 
 
 def test_the_rows_claim_disjoint_shapes() -> None:
@@ -230,6 +258,7 @@ def test_the_rows_claim_disjoint_shapes() -> None:
         _context(metodo_pago=None),
         _context(tipo="E", metodo_pago=None),
         _context(tipo="T", metodo_pago=None),
+        _context(tipo="P", metodo_pago=None),
         _context(perspective=Perspective.RECIBIDO),
     ]
     for context in contexts:

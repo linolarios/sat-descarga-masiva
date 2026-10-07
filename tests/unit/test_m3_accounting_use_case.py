@@ -66,8 +66,13 @@ from sat_descarga_masiva.domain.model.perspective import Perspective
 from sat_descarga_masiva.domain.model.raw_cfd import (
     RawCfd,
     RawConcepto,
+    RawDoctoRelacionado,
     RawImpuestos,
+    RawImpuestosDR,
+    RawPago,
+    RawPagos20,
     RawTraslado,
+    RawTrasladoDR,
 )
 from sat_descarga_masiva.domain.model.review import ReviewFlag, ReviewFlags, ReviewFlagType
 from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
@@ -871,3 +876,120 @@ def test_a30_a_projection_with_no_document_is_a_calling_error_not_a_document_out
     assert harness.provider.asked == []
     assert harness.records == ()
     assert harness.clock.calls == 0
+
+
+# --- T23: a REP is accounted against the ledger, not against what it states (§8:184/§8:192) --
+
+#: The CFDI a REP settles — its own UUID, never the REP's (§8:194).
+ORIGINAL = Uuid("111E4567-E89B-12D3-A456-426614174000")
+
+
+def _original(**overrides: object) -> RawDoctoRelacionado:
+    """The `DoctoRelacionado` a REP states: a fully paid MXN invoice carrying 16.00 of IVA."""
+    base: dict[str, object] = {
+        "id_documento": ORIGINAL.value,
+        "moneda_dr": "MXN",
+        "num_parcialidad": "1",
+        "imp_saldo_ant": "116.00",
+        "imp_pagado": "116.00",
+        "objeto_imp_dr": "01",
+        "imp_saldo_insoluto": "0.00",
+        "impuestos_dr": RawImpuestosDR(
+            traslados_dr=(
+                RawTrasladoDR(
+                    base_dr="100.00", impuesto_dr="002", tipo_factor_dr="Tasa", importe_dr="16.00"
+                ),
+            )
+        ),
+    }
+    base.update(overrides)
+    return RawDoctoRelacionado(**base)  # type: ignore[arg-type]
+
+
+def _rep_document() -> FiscalDocument:
+    """A `P` comprobante: the client issued the invoice this collection settles (EMITIDO)."""
+    raw = RawCfd(
+        tipo="P",
+        version="4.0",
+        moneda="MXN",
+        tipo_cambio=None,
+        emisor_rfc=CONTRIBUTOR.value,
+        receptor_rfc=EMISOR.value,
+        conceptos=(RawConcepto("84111506", "1", "0.00", "0.00", None),),
+        impuestos=RawImpuestos(),
+        total="0.00",
+        subtotal="0.00",
+        uuid=UUID.value,
+        fecha="2024-03-15T10:30:00",
+        metodo_pago=None,
+        pagos=RawPagos20(
+            version="2.0",
+            pagos=(
+                RawPago(
+                    fecha_pago="2024-04-01T09:00:00",
+                    forma_de_pago_p="03",
+                    moneda_p="MXN",
+                    monto="116.00",
+                    doctos_relacionados=(_original(),),
+                ),
+            ),
+        ),
+    )
+    parsed = build_fiscal_document(raw, SOURCE_HASH)
+    assert parsed.document is not None, parsed.outcome
+    return replace(parsed.document, status=FiscalDocumentStatus.VIGENTE)
+
+
+def _posted_original() -> JournalEntryRecord:
+    """The client's books holding the settled CFDI as a `POSTED` entry — §8:192's presence seam."""
+    return JournalEntryRecord(
+        entry_key='["AAA010101AAA","111E4567","4.1","1","","2026.01"]',
+        contributor_rfc=CONTRIBUTOR,
+        source_uuid=ORIGINAL,
+        source_hash=SOURCE_HASH,
+        rule_id="4.1",
+        rule_version="1",
+        mapping_version=MAPPING_VERSION,
+        policy_version="1",
+        posting_state=PostingState.POSTED,
+        entry_date=date(2024, 3, 15),
+        recorded_at=WHEN,
+        lines=(
+            _journal_line(0, AccountRole.CLEARING, LineSide.DEBE, "116.00", "102-099"),
+            _journal_line(1, AccountRole.INGRESOS, LineSide.HABER, "100.00", "401-001"),
+            _journal_line(
+                2, AccountRole.IVA_TRASLADADO_COBRADO, LineSide.HABER, "16.00", "208-001"
+            ),
+        ),
+    )
+
+
+def test_a23_a_rep_is_accounted_against_the_ledger_the_client_holds() -> None:
+    """T23 §8:184/§8:192: the store, not the REP, says whether the original was ever booked.
+
+    A REP states payments, never that the CFDI it settles was ever posted, so the application layer
+    resolves that presence from the store and the rule reads it as `posted_source_uuids`. With no
+    `POSTED` original the collection is refused — and the refusal is still recorded for review;
+    once the client's books hold the original as `POSTED`, the same REP reclassifies it and posts.
+    """
+    collected = _processed(_rep_document(), perspective=Perspective.EMITIDO)
+
+    refused = _harness().execute(collected)
+    assert refused.decision.posting_state is PostingState.PROPOSED
+    assert _flag_types(refused) == [ReviewFlagType.MISSING_REP_ORIGINAL]
+    assert refused.record is not None  # §8:167: the refusal is the audit evidence
+
+    harness = _harness()
+    harness.store.append(_posted_original())  # nothing but the ledger changed
+    settled = harness.execute(collected)
+
+    assert settled.decision.posting_state is PostingState.POSTED
+    assert settled.record is not None
+    assert settled.record.rule_id == "4.5a"
+    assert _legs(settled.record) == [
+        (AccountRole.CLEARING, LineSide.DEBE, "116.00", "102-099"),
+        (AccountRole.CLIENTES, LineSide.HABER, "116.00", "105-001"),
+        (AccountRole.IVA_TRASLADADO_NO_COBRADO, LineSide.DEBE, "16.00", "209-001"),
+        (AccountRole.IVA_TRASLADADO_COBRADO, LineSide.HABER, "16.00", "208-001"),
+    ]
+    assert harness.records == (settled.record,)  # §8:166: appended once, readable back
