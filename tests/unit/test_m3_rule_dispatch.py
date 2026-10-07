@@ -194,8 +194,6 @@ def test_the_out_of_scope_table_is_the_only_way_to_a_skip(
     [
         ("E", Perspective.EMITIDO),
         ("E", Perspective.RECIBIDO),
-        ("N", Perspective.EMITIDO),
-        ("R", Perspective.EMITIDO),
         ("X", Perspective.EMITIDO),
         ("I", Perspective.UNDETERMINED),
         ("P", Perspective.UNDETERMINED),

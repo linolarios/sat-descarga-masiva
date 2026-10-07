@@ -188,9 +188,25 @@ def _flag(flag_type: ReviewFlagType, reason: str) -> ReviewFlag:
     return ReviewFlag(flag_type=flag_type, reason=reason)
 
 
+class EntryKey(Protocol):
+    """The slice of a rule row :func:`_review` needs to key the entry it refuses: §8:194's ids.
+
+    Narrower than `RuleRow` on purpose. ``_review`` reads only the rule id and version to build the
+    entry's fingerprint, so a case that declines to post — §8a:205's drafts (`drafts.py`) — can key
+    its entry without pretending to be a posting row (a REP or `I`/`E` row also claims a shape and
+    proposes legs, which a draft never does).
+    """
+
+    @property
+    def rule_id(self) -> str: ...
+
+    @property
+    def rule_version(self) -> str: ...
+
+
 def _review(
     request: PostingContext,
-    row: RuleRow,
+    row: EntryKey,
     *,
     flags: tuple[ReviewFlag, ...],
     detail: str,

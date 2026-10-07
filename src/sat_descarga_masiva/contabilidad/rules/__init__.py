@@ -2,7 +2,8 @@
 
 ``contract`` holds what a rule reads (`PostingContext`) and the only three answers it may
 give (`ProposedJournalEntry`, `Skip`, or `ReviewRequest`); ``scope`` holds §8:161's exhaustive
-``SKIPPED`` set, and ``posting`` holds the posting rules of §8's table plus the selector that
+``SKIPPED`` set; ``drafts`` holds §8a:205's zero-line ``NEEDS_REVIEW`` drafts (the ``N``/``R``
+**emitido** cases); and ``posting`` holds the posting rules of §8's table plus the selector that
 picks between them (`propose`). The rules arrive one at a time, each with golden and mutation
 tests (§12).
 

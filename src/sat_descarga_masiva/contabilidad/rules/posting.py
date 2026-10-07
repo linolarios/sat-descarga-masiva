@@ -34,9 +34,11 @@ a document that cannot be dated or identified is refused before anything is comp
 posts unless `Total == base + IVA` holds, which is what makes the proposed entry balance.
 
 `propose(request)` is the engine's one door per document — skip, propose, or review
-(§8:161/173) — so the pipeline asks one question and gets one of the three answers. The rows it
-walks are this module's `I` rows plus §8's REP rows from `reposting.py` (4.5a/4.5b), in one
-ordered tuple: a `P` comprobante is claimed by its own row and by nothing here.
+(§8:161/173) — so the pipeline asks one question and gets one of the three answers. It consults
+§8:161's out-of-scope table (`scope.py`) first, then §8a:205's draft table (`drafts.py`, the `N`/`R`
+**emitido** drafts) — the two "tables of decided refusals", adjacent so neither can quietly grow.
+The rows it walks are this module's `I` rows plus §8's REP rows from `reposting.py` (4.5a/4.5b), in
+one ordered tuple: a `P` comprobante is claimed by its own row and by nothing here.
 """
 
 from __future__ import annotations
@@ -67,6 +69,7 @@ from sat_descarga_masiva.contabilidad.rules.contract import (
     _recordability_flags,
     _review,
 )
+from sat_descarga_masiva.contabilidad.rules.drafts import draft
 from sat_descarga_masiva.contabilidad.rules.reposting import REP_ROWS
 from sat_descarga_masiva.contabilidad.rules.scope import out_of_scope
 from sat_descarga_masiva.domain.enums.comprobante import TipoComprobante
@@ -593,15 +596,19 @@ SUPPORTED_RULES: dict[str, str] = {row.rule_id: row.rule_version for row in POST
 def propose(request: PostingContext) -> Proposal:
     """The engine's one door per document (§8:161/173): skip it, propose it, or review it.
 
-    ``SKIPPED`` is reachable only through §8:161's out-of-scope table, and a document no rule
-    can claim is a `ReviewRequest` — never a silent skip, and never a guess. The refusals here
-    are deliberately *document-level* (no entry): no rule owns the document's shape, so there is
-    no §8 number to key an entry by, and the review fact belongs to the document itself
-    (§8:167).
+    ``SKIPPED`` is reachable only through §8:161's out-of-scope table; §8a:205's drafts
+    (`drafts.py`, the ``N``/``R`` **emitido** cases) come next, and they are keyed zero-line
+    `ReviewRequest`s. A document no rule claims and no draft table holds is then a
+    *document-level* `ReviewRequest` — never a silent skip, and never a guess: no rule owns its
+    shape, so there is no §8 number to key an entry by and the review fact belongs to the
+    document itself (§8:167).
     """
     skip = out_of_scope(request)
     if skip is not None:
         return skip
+    drafted = draft(request)
+    if drafted is not None:
+        return drafted
     for row in POSTING_RULES:
         if row.claims(request):
             return row.propose(request)

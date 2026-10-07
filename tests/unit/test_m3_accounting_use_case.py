@@ -374,7 +374,7 @@ def test_a7_a_received_retenciones_acuse_is_skipped_and_recorded() -> None:
     assert harness.records[0].posting_state is PostingState.SKIPPED
 
 
-# --- A8-A13: a refusal that names no entry writes nothing and reads no clock (§8:167) ------
+# --- A9-A13: a refusal that names no entry writes nothing and reads no clock (§8:167) ------
 
 #: What every document-level refusal asserts: `PROPOSED` with a reason, and no §8:194 identity
 #: to append under — inventing one is exactly what §8:167 forbids.
@@ -391,15 +391,6 @@ def _assert_document_level(result: AccountingResult, harness: _Harness) -> None:
     assert result.record is None
     assert harness.records == ()
     assert harness.clock.calls == 0  # nothing became durable, so nothing was dated (§8:166)
-
-
-def test_a8_an_issued_payroll_draft_is_not_a_skip_and_posts_nothing() -> None:
-    """A8 §8:161: `N` *emitido* is §8a:205's draft — a review, never a silent skip."""
-    harness = _harness()
-    result = harness.execute(_processed(_document(tipo="N"), perspective=Perspective.EMITIDO))
-
-    _assert_document_level(result, harness)
-    assert _flag_types(result) == [ReviewFlagType.UNSUPPORTED_RULE]
 
 
 @pytest.mark.parametrize("tipo", ["E", "Z"], ids=["egreso", "not-a-cfdi-type"])
@@ -450,7 +441,7 @@ def test_a13_an_unknown_metodo_pago_chooses_neither_row_of_the_table(
     assert _flag_types(result) == [ReviewFlagType.MISSING_SOURCE_FIELD]
 
 
-# --- A14-A18: a refusal that *names an entry* is still recorded (§8:167's audit evidence) ---
+# --- A8, A14-A18: a refusal that names an entry is still recorded (§8:167's audit evidence) -
 
 
 def _assert_proposed_record(result: AccountingResult, harness: _Harness) -> JournalEntryRecord:
@@ -463,6 +454,18 @@ def _assert_proposed_record(result: AccountingResult, harness: _Harness) -> Jour
     assert harness.records == (result.record,)
     assert harness.clock.calls == 1
     return result.record
+
+
+def test_a8_an_issued_payroll_draft_names_a_zero_line_entry_never_a_skip() -> None:
+    """A8 §8a:205: `N` *emitido* is a draft — a recorded, zero-line `NEEDS_REVIEW`, never a skip."""
+    harness = _harness()
+    result = harness.execute(_processed(_document(tipo="N"), perspective=Perspective.EMITIDO))
+
+    record = _assert_proposed_record(result, harness)
+    assert record.rule_id == "4.10"  # §8:194: keyed by the rule that raised the draft
+    assert record.lines == ()
+    assert record.entry_date == date(2024, 5, 15)
+    assert _flag_types(result) == [ReviewFlagType.PAYROLL_DRAFT_UNSUPPORTED]
 
 
 @pytest.mark.parametrize(
