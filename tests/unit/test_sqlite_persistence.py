@@ -7,10 +7,12 @@ import pytest
 
 from sat_descarga_masiva.domain.enums.catalog import Direction, ServiceType
 from sat_descarga_masiva.domain.errors import SourceHashConflict
+from sat_descarga_masiva.domain.model.cursor import DownloadCursor
 from sat_descarga_masiva.domain.model.ledger import DownloadJob, JobStatus
 from sat_descarga_masiva.domain.model.source import SourceIdentity, sha256_hex
 from sat_descarga_masiva.domain.model.value_objects import RequestId, Rfc
 from sat_descarga_masiva.infrastructure.persistence.sqlite import (
+    SqliteDownloadCursorRepository,
     SqliteDownloadJobRepository,
     SqliteSourceIdentityIndex,
 )
@@ -41,6 +43,33 @@ def _job(**overrides: object) -> DownloadJob:
     )
     base.update(overrides)
     return DownloadJob(**base)  # type: ignore[arg-type]
+
+
+def _cursor(**overrides: object) -> DownloadCursor:
+    base = dict(
+        client_rfc=RFC,
+        service=ServiceType.CFDI,
+        direction=Direction.RECIBIDOS,
+        query_start=START,
+        query_end=END,
+        last_successful_boundary=START,
+        last_request_id=RID,
+        last_completed_at=START,
+    )
+    base.update(overrides)
+    return DownloadCursor(**base)  # type: ignore[arg-type]
+
+
+def _rowid(conn: sqlite3.Connection, table: str, where: str, params: tuple[object, ...]) -> int:
+    row = conn.execute(f"SELECT rowid FROM {table} WHERE {where}", params).fetchone()
+    assert row is not None
+    return int(row["rowid"])
+
+
+def _count(conn: sqlite3.Connection, table: str) -> int:
+    row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+    assert row is not None
+    return int(row["n"])
 
 
 def test_connection_uses_row_factory() -> None:
@@ -93,3 +122,56 @@ def test_source_conflict_keeps_original_row_in_db() -> None:
     row = conn.execute("SELECT uuid, sha256 FROM source_records WHERE uuid = ?", ("u1",)).fetchone()
     assert row is not None
     assert row["sha256"] == sha256_hex(b"a")  # original preserved at the DB level
+
+
+# A re-saved job updates its row in place -- never delete+reinsert (AGENT.md 11 M3).
+def test_job_re_save_updates_in_place_without_delete_reinsert() -> None:
+    conn = _conn()
+    repo = SqliteDownloadJobRepository(conn)
+    repo.save(_job(job_id="job-1", status=JobStatus.RUNNING))
+    repo.save(_job(job_id="job-2", status=JobStatus.RUNNING))  # keep job-1 off the rowid frontier
+
+    before = _rowid(conn, "download_jobs", "job_id = ?", ("job-1",))
+    repo.save(_job(job_id="job-1", status=JobStatus.COMPLETED, completed_at=END))
+
+    # D1.1 -- the mutable operational state moved
+    got = repo.get("job-1")
+    assert got is not None
+    assert got.status is JobStatus.COMPLETED
+    assert got.completed_at == END
+    # D1.2 -- the same physical row, not a fresh one
+    assert _rowid(conn, "download_jobs", "job_id = ?", ("job-1",)) == before
+    # D1.3 -- no duplicate key row
+    assert _count(conn, "download_jobs") == 2
+    # D1.4 -- the conflict key survives the update
+    key = conn.execute("SELECT job_id FROM download_jobs WHERE rowid = ?", (before,)).fetchone()
+    assert key is not None
+    assert key["job_id"] == "job-1"
+
+
+# A re-saved cursor advances its row in place -- never delete+reinsert.
+def test_cursor_re_save_updates_in_place_without_delete_reinsert() -> None:
+    conn = _conn()
+    repo = SqliteDownloadCursorRepository(conn)
+    repo.save(_cursor(direction=Direction.RECIBIDOS))
+    repo.save(_cursor(direction=Direction.EMITIDOS))
+
+    where = "client_rfc = ? AND service = ? AND direction = ?"
+    target = (RFC.value, ServiceType.CFDI.value, Direction.RECIBIDOS.value)
+    before = _rowid(conn, "download_cursors", where, target)
+    repo.save(_cursor(direction=Direction.RECIBIDOS, last_successful_boundary=END))
+
+    # D1.1 -- the mutable resume state moved
+    got = repo.get(RFC, ServiceType.CFDI, Direction.RECIBIDOS)
+    assert got is not None
+    assert got.last_successful_boundary == END
+    # D1.2 -- the same physical row, not a fresh one
+    assert _rowid(conn, "download_cursors", where, target) == before
+    # D1.3 -- no duplicate key row
+    assert _count(conn, "download_cursors") == 2
+    # D1.4 -- the conflict key survives the update
+    key = conn.execute(
+        "SELECT client_rfc, service, direction FROM download_cursors WHERE rowid = ?", (before,)
+    ).fetchone()
+    assert key is not None
+    assert (key["client_rfc"], key["service"], key["direction"]) == target

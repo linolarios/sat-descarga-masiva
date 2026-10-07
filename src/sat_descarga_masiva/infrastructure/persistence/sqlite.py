@@ -126,11 +126,23 @@ CREATE TABLE IF NOT EXISTS source_records (
 )
 """
 
-_INSERT_JOB = """
-INSERT OR REPLACE INTO download_jobs (
+_UPSERT_JOB = """
+INSERT INTO download_jobs (
     job_id, client_rfc, service, direction, request_id, query_start, query_end,
     policy_version, status, created_at, completed_at, pipeline_run_id
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (job_id) DO UPDATE SET
+    client_rfc = excluded.client_rfc,
+    service = excluded.service,
+    direction = excluded.direction,
+    request_id = excluded.request_id,
+    query_start = excluded.query_start,
+    query_end = excluded.query_end,
+    policy_version = excluded.policy_version,
+    status = excluded.status,
+    created_at = excluded.created_at,
+    completed_at = excluded.completed_at,
+    pipeline_run_id = excluded.pipeline_run_id
 """
 
 _SELECT_JOB = """
@@ -142,10 +154,16 @@ WHERE job_id = ?
 """
 
 _UPSERT_CURSOR = """
-INSERT OR REPLACE INTO download_cursors (
+INSERT INTO download_cursors (
     client_rfc, service, direction, query_start, query_end,
     last_successful_boundary, last_request_id, last_completed_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (client_rfc, service, direction) DO UPDATE SET
+    query_start = excluded.query_start,
+    query_end = excluded.query_end,
+    last_successful_boundary = excluded.last_successful_boundary,
+    last_request_id = excluded.last_request_id,
+    last_completed_at = excluded.last_completed_at
 """
 
 _SELECT_CURSOR = """
@@ -763,7 +781,11 @@ def _cursor_from_row(row: sqlite3.Row) -> DownloadCursor:
 
 
 class SqliteDownloadJobRepository:
-    """DownloadJobRepository over the `download_jobs` table."""
+    """DownloadJobRepository over `download_jobs` (mutable operational state, §11 M1).
+
+    A repeat `save` of the same `job_id` upserts the row in place -- the job's
+    operational state is never delete+reinserted, so the row identity stays put.
+    """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         conn.row_factory = sqlite3.Row
@@ -773,7 +795,7 @@ class SqliteDownloadJobRepository:
 
     def save(self, job: DownloadJob) -> None:
         self._conn.execute(
-            _INSERT_JOB,
+            _UPSERT_JOB,
             (
                 job.job_id,
                 job.client_rfc.value,
@@ -797,7 +819,11 @@ class SqliteDownloadJobRepository:
 
 
 class SqliteDownloadCursorRepository:
-    """DownloadCursorRepository over the `download_cursors` table."""
+    """DownloadCursorRepository over `download_cursors` (mutable resume state, §11 M1).
+
+    A repeat `save` of the same `(client_rfc, service, direction)` upserts the row in
+    place -- the resume marker is never delete+reinserted.
+    """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         conn.row_factory = sqlite3.Row
