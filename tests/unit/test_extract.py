@@ -22,7 +22,7 @@ EGRESO = b'<cfdi:Comprobante xmlns:cfdi="http://www.sat.gob.mx/cfd/4" TipoDeComp
 POLICY = ExtractionPolicy(max_total_bytes=1024 * 1024, max_entries=100)
 
 
-def _zip(members: list[tuple[str, bytes]]) -> bytes:
+def _zip(members: list[tuple[str | zipfile.ZipInfo, bytes]]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         for name, data in members:
@@ -111,7 +111,9 @@ def test_empty_path_guard_is_unreachable_through_extract(tmp_path) -> None:
     `_reject_unsafe_path`, and the empty path cannot end in `.xml`. The guard is therefore
     dead defensive code: pinned here by calling it directly, and flagged for deletion.
     """
-    content = _zip([("", INGRESO)])  # zipfile accepts an empty member name
+    # `writestr("", …)` indexes an empty str on Python 3.11 (IndexError inside zipfile);
+    # an explicit ZipInfo bypasses that str-only path and works on 3.11 and 3.12 alike.
+    content = _zip([(zipfile.ZipInfo(""), INGRESO)])  # zipfile accepts an empty member name
     assert SafeZipExtractor(tmp_path, POLICY).extract(_pid(), content) == ()
 
     with pytest.raises(ExtractionError, match="empty path"):
