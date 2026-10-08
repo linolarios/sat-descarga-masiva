@@ -50,8 +50,10 @@ from sat_descarga_masiva.domain.model.contributor import (
 from sat_descarga_masiva.domain.model.csf import CsfArtifact
 from sat_descarga_masiva.domain.model.cursor import DownloadCursor
 from sat_descarga_masiva.domain.model.documents import DocumentRecord
+from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocumentStatus
 from sat_descarga_masiva.domain.model.fiscal_event import FiscalEvent
 from sat_descarga_masiva.domain.model.ledger import DownloadJob, JobStatus
+from sat_descarga_masiva.domain.model.metadata_snapshot import MetadataSnapshot
 from sat_descarga_masiva.domain.model.perspective import Perspective
 from sat_descarga_masiva.domain.model.pipeline_run import (
     PipelineFlow,
@@ -472,6 +474,39 @@ ON CONFLICT DO NOTHING
 
 _SELECT_EVENTS = f"""
 SELECT {_EVENT_COLUMNS} FROM fiscal_events WHERE uuid = ? ORDER BY event_id
+"""
+
+#: The stored vocabulary of ``status`` is the received fiscal word (§8a:206/D-M3-7b), never the
+#: SAT query's internal codes; the mapping lives only in this adapter, so no word reaches the
+#: domain. ``_status_word``/``_status_from_word`` fall back to the enum's own value / ``UNKNOWN``
+#: exactly as §8a:206 prescribes ("anything else/absent → UNKNOWN; never crash, never guess").
+_STATUS_FROM_WORD: dict[str, FiscalDocumentStatus] = {
+    "Vigente": FiscalDocumentStatus.VIGENTE,
+    "Cancelado": FiscalDocumentStatus.CANCELLED,
+}
+_STATUS_WORD: dict[FiscalDocumentStatus, str] = {
+    status: word for word, status in _STATUS_FROM_WORD.items()
+}
+
+_METADATA_COLUMNS = """
+    uuid, contributor_rfc, status, cancellation_date, cancellation_reason,
+    substitution_uuid, retrieved_at, source_hash
+"""
+
+#: ``ON CONFLICT DO NOTHING`` mirrors ``_INSERT_EVENT``: identical evidence is a no-op while a
+#: differently-shaped observation (a new ``retrieved_at`` or hash) inserts, so a refresh appends.
+_INSERT_METADATA = f"""
+INSERT INTO metadata_snapshots ({_METADATA_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT DO NOTHING
+"""
+
+#: Newest by ``retrieved_at``; a ``retrieved_at`` tie is broken by insertion order
+#: (``snapshot_id DESC``) so a later observation wins — the same rule the memory adapter uses.
+_SELECT_LATEST_METADATA = f"""
+SELECT {_METADATA_COLUMNS} FROM metadata_snapshots
+WHERE uuid = ? AND contributor_rfc = ?
+ORDER BY retrieved_at DESC, snapshot_id DESC
+LIMIT 1
 """
 
 _PROFILE_COLUMNS = """
@@ -920,6 +955,35 @@ def _event_from_row(row: sqlite3.Row) -> FiscalEvent:
     )
 
 
+def _status_word(status: FiscalDocumentStatus) -> str:
+    """Domain enum → the stored fiscal word; an ``UNKNOWN`` observation keeps the enum's value."""
+    return _STATUS_WORD.get(status, status.value)
+
+
+def _status_from_word(word: str) -> FiscalDocumentStatus:
+    """The stored fiscal word → domain enum; anything else is ``UNKNOWN`` (§8a:206)."""
+    return _STATUS_FROM_WORD.get(word, FiscalDocumentStatus.UNKNOWN)
+
+
+def _metadata_from_row(row: sqlite3.Row) -> MetadataSnapshot:
+    return MetadataSnapshot(
+        uuid=Uuid(row["uuid"]),
+        contributor_rfc=Rfc(row["contributor_rfc"]),
+        status=_status_from_word(row["status"]),
+        retrieved_at=_from_iso(row["retrieved_at"]),
+        source_hash=row["source_hash"],
+        cancellation_date=(
+            date.fromisoformat(row["cancellation_date"])
+            if row["cancellation_date"] is not None
+            else None
+        ),
+        cancellation_reason=row["cancellation_reason"],
+        substitution_uuid=(
+            Uuid(row["substitution_uuid"]) if row["substitution_uuid"] is not None else None
+        ),
+    )
+
+
 def _profile_from_row(
     row: sqlite3.Row, obligaciones: tuple[ObligacionFiscal, ...] = ()
 ) -> ContributorProfileRecord:
@@ -1116,6 +1180,47 @@ class SqliteFiscalEventStore:
     def for_uuid(self, uuid: Uuid) -> tuple[FiscalEvent, ...]:
         rows = self._conn.execute(_SELECT_EVENTS, (uuid.value,)).fetchall()
         return tuple(_event_from_row(row) for row in rows)
+
+
+class SqliteMetadataSnapshotStore:
+    """MetadataSnapshotStore over the append-only `metadata_snapshots` table (§6).
+
+    ``status`` is stored as the received fiscal word and mapped to the domain enum on read
+    (§8a:206); the word never reaches the domain. ``ON CONFLICT DO NOTHING`` (never
+    ``INSERT OR REPLACE``) makes identical evidence an idempotent no-op while a refreshed
+    observation inserts, so the history only ever grows.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        conn.row_factory = sqlite3.Row
+        self._conn = conn
+        self._conn.execute(_CREATE_METADATA_SNAPSHOTS)
+
+    def append(self, snapshot: MetadataSnapshot) -> None:
+        self._conn.execute(
+            _INSERT_METADATA,
+            (
+                snapshot.uuid.value,
+                snapshot.contributor_rfc.value,
+                _status_word(snapshot.status),
+                snapshot.cancellation_date.isoformat()
+                if snapshot.cancellation_date is not None
+                else None,
+                snapshot.cancellation_reason,
+                snapshot.substitution_uuid.value
+                if snapshot.substitution_uuid is not None
+                else None,
+                _iso(snapshot.retrieved_at),
+                snapshot.source_hash,
+            ),
+        )
+        self._conn.commit()
+
+    def latest_for(self, contributor_rfc: Rfc, uuid: Uuid) -> MetadataSnapshot | None:
+        row = self._conn.execute(
+            _SELECT_LATEST_METADATA, (uuid.value, contributor_rfc.value)
+        ).fetchone()
+        return _metadata_from_row(row) if row is not None else None
 
 
 class SqliteContributorProfileRepository:

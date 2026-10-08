@@ -26,6 +26,7 @@ from sat_descarga_masiva.domain.model.cursor import DownloadCursor
 from sat_descarga_masiva.domain.model.documents import DocumentRecord
 from sat_descarga_masiva.domain.model.fiscal_event import FiscalEvent
 from sat_descarga_masiva.domain.model.ledger import DownloadJob
+from sat_descarga_masiva.domain.model.metadata_snapshot import MetadataSnapshot
 from sat_descarga_masiva.domain.model.pipeline_run import PipelineRun
 from sat_descarga_masiva.domain.model.review import (
     ReviewFlag,
@@ -52,6 +53,16 @@ def _event_key(event: FiscalEvent) -> tuple[str, str, str, datetime, str]:
         event.kind,
         event.effective_at,
         event.source_hash,
+    )
+
+
+def _metadata_key(snapshot: MetadataSnapshot) -> tuple[str, str, datetime, str]:
+    """The idempotency key of one metadata observation (§6 append-only observation)."""
+    return (
+        snapshot.uuid.value,
+        snapshot.contributor_rfc.value,
+        snapshot.retrieved_at,
+        snapshot.source_hash,
     )
 
 
@@ -180,6 +191,39 @@ class InMemoryFiscalEventStore:
 
     def for_uuid(self, uuid: Uuid) -> tuple[FiscalEvent, ...]:
         return tuple(event for event in self._events if event.uuid.value == uuid.value)
+
+
+class InMemoryMetadataSnapshotStore:
+    """MetadataSnapshotStore over an append-only list keyed by the observation's identity.
+
+    ``latest_for`` returns the newest observation *by ``retrieved_at``*; a tie is broken by
+    append order (the later observation wins) so this adapter and the SQLite one agree.
+    """
+
+    def __init__(self) -> None:
+        self._snapshots: list[MetadataSnapshot] = []
+        self._keys: set[tuple[str, str, datetime, str]] = set()
+
+    def append(self, snapshot: MetadataSnapshot) -> None:
+        normalized = replace(snapshot, retrieved_at=_utc(snapshot.retrieved_at))
+        key = _metadata_key(normalized)
+        if key in self._keys:
+            return  # identical evidence: append-only, so nothing is rewritten
+        self._keys.add(key)
+        self._snapshots.append(normalized)
+
+    def latest_for(self, contributor_rfc: Rfc, uuid: Uuid) -> MetadataSnapshot | None:
+        candidates = [
+            snapshot
+            for snapshot in self._snapshots
+            if snapshot.uuid.value == uuid.value
+            and snapshot.contributor_rfc.value == contributor_rfc.value
+        ]
+        if not candidates:
+            return None
+        # ``reversed`` so a later append wins a ``retrieved_at`` tie, matching the SQLite
+        # adapter's ``ORDER BY retrieved_at DESC, snapshot_id DESC``.
+        return max(reversed(candidates), key=lambda snapshot: snapshot.retrieved_at)
 
 
 class InMemoryContributorProfileRepository:
