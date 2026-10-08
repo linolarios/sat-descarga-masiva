@@ -13,6 +13,7 @@ from sat_descarga_masiva.domain.model.cursor import DownloadCursor
 from sat_descarga_masiva.domain.model.documents import DocumentRecord
 from sat_descarga_masiva.domain.model.fiscal_event import FiscalEvent
 from sat_descarga_masiva.domain.model.ledger import DownloadJob
+from sat_descarga_masiva.domain.model.metadata_snapshot import MetadataSnapshot
 from sat_descarga_masiva.domain.model.pipeline_run import PipelineRun
 from sat_descarga_masiva.domain.model.results import Package
 from sat_descarga_masiva.domain.model.review import (
@@ -96,6 +97,21 @@ class FiscalEventStore(Protocol):
 
     def append(self, event: FiscalEvent) -> None: ...
     def for_uuid(self, uuid: Uuid) -> tuple[FiscalEvent, ...]: ...
+
+
+class MetadataSnapshotStore(Protocol):
+    """M3-owned `metadata_snapshots` table: the timestamped status observations (§6).
+
+    Append-only and idempotent, keyed by
+    ``(uuid, contributor_rfc, retrieved_at, source_hash)``: re-appending the
+    identical observation stores one row and never rewrites it, so a later refresh
+    cannot revise what an earlier read recorded (§4). ``latest_for`` returns the
+    newest observation *by ``retrieved_at``* — never insertion order — because a
+    refreshed snapshot is a new fact and the current status is the most recent one.
+    """
+
+    def append(self, snapshot: MetadataSnapshot) -> None: ...
+    def latest_for(self, contributor_rfc: Rfc, uuid: Uuid) -> MetadataSnapshot | None: ...
 
 
 class JournalEntryStore(Protocol):
