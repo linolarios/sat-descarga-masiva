@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from sat_descarga_masiva.application.ports.persistence import MetadataSnapshotStore
 from sat_descarga_masiva.application.use_cases.execute_accounting import (
     AccountingResult,
     ExecuteAccountingUseCase,
@@ -34,6 +35,7 @@ from sat_descarga_masiva.contabilidad.rules.posting import SUPPORTED_RULES
 from sat_descarga_masiva.contabilidad.validator import PostingEligibilityValidator
 from sat_descarga_masiva.domain.errors import MappingNotConfigured
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocumentStatus
+from sat_descarga_masiva.domain.model.metadata_snapshot import MetadataSnapshot
 from sat_descarga_masiva.domain.model.raw_cfd import (
     RawCfd,
     RawConcepto,
@@ -50,7 +52,10 @@ from sat_descarga_masiva.domain.model.signature import SignatureOutcome, Signatu
 from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
 from sat_descarga_masiva.fiscal.projection import ProcessedDocument, project_document
 from sat_descarga_masiva.infrastructure.mapping.yaml_mapping import YamlMappingProvider
-from sat_descarga_masiva.infrastructure.persistence.memory import InMemoryJournalEntryStore
+from sat_descarga_masiva.infrastructure.persistence.memory import (
+    InMemoryJournalEntryStore,
+    InMemoryMetadataSnapshotStore,
+)
 
 #: The committed charts of accounts, one YAML per client (§8a:207).
 MAPPINGS = Path(__file__).parent.parent / "fixtures" / "mappings"
@@ -70,7 +75,8 @@ GASTO = "84111506"
 #: The CFDI a REP settles — a UUID of its own, distinct from the REP's TFD UUID (§8:194).
 SETTLED = Uuid("111E4567-E89B-12D3-A456-426614174000")
 #: §8:159's condition 1 as this tier supplies it: a *resolved* VIGENTE source state. The metadata
-#: join that resolves it (§6:123) is a different stage; the projection's own value is `UNKNOWN`.
+#: join that resolves it (§6:123) is wired in by ``_chain(snapshots=...)``; absent that store the
+#: projection's own value is the fail-closed `UNKNOWN`, which §8:159 refuses.
 VIGENTE = FiscalDocumentStatus.VIGENTE
 
 
@@ -99,8 +105,12 @@ class _Chain:
         return self.store.for_source(CLIENT, TFD_UUID)
 
 
-def _chain(root: Path = MAPPINGS) -> _Chain:
-    """The production chain, wired the way the application layer wires it (§8a:207)."""
+def _chain(root: Path = MAPPINGS, *, snapshots: MetadataSnapshotStore | None = None) -> _Chain:
+    """The production chain, wired the way the application layer wires it (§8a:207).
+
+    ``snapshots`` is the metadata join (§6:123): without it the chain still books a document the
+    projection already resolved, but a document handed over ``UNKNOWN`` has nothing to resolve it.
+    """
     provider = YamlMappingProvider(root)
     store = InMemoryJournalEntryStore()
     return _Chain(
@@ -110,8 +120,20 @@ def _chain(root: Path = MAPPINGS) -> _Chain:
             validator=PostingEligibilityValidator(provider, supported_rules=SUPPORTED_RULES),
             store=store,
             clock=_FixedClock(RECORDED_AT),
+            snapshots=snapshots,
         ),
         store=store,
+    )
+
+
+def _observation(status: FiscalDocumentStatus) -> MetadataSnapshot:
+    """The SAT's last word on this chain's CFDI, as a metadata fact (§6)."""
+    return MetadataSnapshot(
+        uuid=TFD_UUID,
+        contributor_rfc=CLIENT,
+        status=status,
+        retrieved_at=RECORDED_AT,
+        source_hash=SOURCE_HASH,
     )
 
 
@@ -197,11 +219,11 @@ def _projected(
     """The M2.6 projection over production code: parse + perspective + authenticity (§6).
 
     ``status`` is set explicitly because the projection never resolves it: the fiscal status is
-    a *metadata* fact (§6:123) that a separate join supplies, and until that join exists the
-    projection's only value is the fail-closed ``UNKNOWN``. §8:159 refuses exactly that
-    (``UNKNOWN_SOURCE_STATE``), so every leg below that asserts a posting must state the
-    eligibility it would have been handed — instead of the refusal it would otherwise get, which
-    would make these tests pass for the wrong reason.
+    a *metadata* fact (§6:123) that the join in ``_chain(snapshots=...)`` — or, absent that store,
+    the caller — supplies. §8:159 refuses the fail-closed ``UNKNOWN`` (``UNKNOWN_SOURCE_STATE``),
+    so every leg below that asserts a posting states the eligibility it would have been handed —
+    instead of the refusal it would otherwise get, which would make these tests pass for the wrong
+    reason. Tests that need the join itself pass a store to ``_chain`` and let it resolve.
     """
     projected = project_document(
         raw,
@@ -288,15 +310,32 @@ def test_a_foreign_currency_document_is_recorded_as_proposed_never_posted() -> N
     assert chain.appended() == (result.record,)
 
 
-def test_the_projection_alone_cannot_post_before_the_metadata_join_exists() -> None:
-    """§8:159 + §6:123: M2.6's own status is `UNKNOWN`, and nothing uncertain is posted.
+def test_the_metadata_join_resolves_the_source_state_and_the_document_posts() -> None:
+    """§6:123: the join closes the gap — the SAT's observation resolves the projection's `UNKNOWN`.
 
-    The honest end-to-end statement of this milestone: the accounting chain is complete, but a
-    document it is handed straight from the projection is refused — with a reason a human can
-    read — until the metadata snapshot resolves the source state. The refusal is recorded, so
-    the fact that nothing was posted is itself auditable.
+    M2.6 resolves no fiscal status; §8:159 refuses an unresolved one. The metadata join is what
+    completes the chain: handed the *same* `UNKNOWN` document, the chain books it once a VIGENTE
+    observation for the CFDI is present.
     """
-    chain = _chain()
+    snapshots = InMemoryMetadataSnapshotStore()
+    snapshots.append(_observation(FiscalDocumentStatus.VIGENTE))
+    chain = _chain(snapshots=snapshots)
+    result = chain.execute(_projected(_raw(), status=FiscalDocumentStatus.UNKNOWN))
+
+    assert result.decision.posting_state is PostingState.POSTED
+    assert result.record is not None
+    assert result.record.posting_state is PostingState.POSTED
+    assert chain.appended() == (result.record,)
+
+
+def test_the_projection_alone_cannot_post_before_the_metadata_join_resolves_it() -> None:
+    """§8:159 + §6:123: with no observation, M2.6's `UNKNOWN` is refused — nothing uncertain posts.
+
+    The honest fail-closed half of the join: a document handed straight from the projection, with
+    no metadata store to resolve its source state, is refused with a reason a human can read. The
+    refusal is recorded, so the fact that nothing was posted is itself auditable.
+    """
+    chain = _chain()  # no metadata store wired: there is nothing to resolve the status with
     result = chain.execute(_projected(_raw(), status=FiscalDocumentStatus.UNKNOWN))
 
     assert result.decision.posting_state is PostingState.PROPOSED

@@ -11,6 +11,11 @@ The sequence, and why each step sits where it does:
   is nothing to account. That is a caller-wiring error, not a document outcome — no §8:194
   identity exists to hang a review flag on — so it raises instead of producing a verdict nobody
   could act on.
+- **the source state is resolved from its metadata observation.** M2.6 leaves the fiscal status
+  ``UNKNOWN`` (no metadata was read), and §8:159 refuses exactly that. So the document's latest
+  `MetadataSnapshot` is joined in here — a VIGENTE observation lets it post, a CANCELLED one
+  refuses it (§6:123). With no store wired, or no observation for the document, the status is
+  left ``UNKNOWN`` and nothing is posted on a presumption (§5/§6).
 - **the review state is merged, then the context is built.** §6's projection composes flags
   from three producers (parser, perspective, signature) onto the `ProcessedDocument`, while a
   rule reads the document. The additive union is taken here, because §8:159's "no unresolved
@@ -53,7 +58,10 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from sat_descarga_masiva.application.ports.accounting import AccountMapping, MappingProvider
-from sat_descarga_masiva.application.ports.persistence import JournalEntryStore
+from sat_descarga_masiva.application.ports.persistence import (
+    JournalEntryStore,
+    MetadataSnapshotStore,
+)
 from sat_descarga_masiva.application.ports.services import Clock
 from sat_descarga_masiva.contabilidad.classification import Classification
 from sat_descarga_masiva.contabilidad.journal import JournalEntryRecord, LineSide, PostingState
@@ -101,11 +109,13 @@ class ExecuteAccountingUseCase:
         validator: PostingEligibilityValidator,
         store: JournalEntryStore,
         clock: Clock,
+        snapshots: MetadataSnapshotStore | None = None,
     ) -> None:
         self._mapping = mapping
         self._validator = validator
         self._store = store
         self._clock = clock
+        self._snapshots = snapshots
 
     def execute(self, processed: ProcessedDocument, *, contributor_rfc: Rfc) -> AccountingResult:
         """Account one projected document for ``contributor_rfc``'s books (§8:169/194).
@@ -115,6 +125,7 @@ class ExecuteAccountingUseCase:
         left to the document's own review state (§8:167) and never reaches the ledger.
         """
         document = _projectable_document(processed)
+        document = _with_resolved_status(document, contributor_rfc, self._snapshots)
         merged = replace(document, review_flags=_merged_review_flags(processed, document))
         mapping = self._mapping.mapping_for(contributor_rfc)
         context = _posting_context(processed, merged, contributor_rfc, mapping, self._store)
@@ -142,6 +153,27 @@ def _projectable_document(processed: ProcessedDocument) -> FiscalDocument:
             f" (§6): {processed.quarantine_reason or 'no quarantine reason given'}"
         )
     return processed.document
+
+
+def _with_resolved_status(
+    document: FiscalDocument, contributor_rfc: Rfc, snapshots: MetadataSnapshotStore | None
+) -> FiscalDocument:
+    """Resolve the document's fiscal status from its latest metadata observation (§6:123).
+
+    M2.6 leaves a projected document ``UNKNOWN`` — no metadata has been read yet — and §8:159
+    refuses exactly that. The accounting stage is where the observation is joined in: the
+    document is booked against whatever the SAT last said about it, so a VIGENTE observation lets
+    it post while a CANCELLED one refuses it. With no store wired, or no observation for this
+    document, the status is left untouched, so an unresolved document stays ``UNKNOWN`` and is
+    never posted on a presumption (never guess, §5/§6). The *latest* observation is the authority
+    (§6), so it always wins — including over M2.6's ``UNKNOWN``.
+    """
+    if snapshots is None or document.source_uuid is None:
+        return document
+    snapshot = snapshots.latest_for(contributor_rfc, document.source_uuid)
+    if snapshot is None:
+        return document
+    return replace(document, status=snapshot.status)
 
 
 def _merged_review_flags(processed: ProcessedDocument, document: FiscalDocument) -> ReviewFlags:

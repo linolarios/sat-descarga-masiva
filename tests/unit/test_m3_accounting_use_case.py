@@ -62,6 +62,7 @@ from sat_descarga_masiva.domain.model.fiscal_document import (
     FiscalDocumentStatus,
     ParseOutcome,
 )
+from sat_descarga_masiva.domain.model.metadata_snapshot import MetadataSnapshot
 from sat_descarga_masiva.domain.model.perspective import Perspective
 from sat_descarga_masiva.domain.model.raw_cfd import (
     RawCfd,
@@ -79,7 +80,10 @@ from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
 from sat_descarga_masiva.domain.policy.money import NormalizedAmount
 from sat_descarga_masiva.fiscal.parse import build_fiscal_document
 from sat_descarga_masiva.fiscal.projection import ProcessedDocument
-from sat_descarga_masiva.infrastructure.persistence.memory import InMemoryJournalEntryStore
+from sat_descarga_masiva.infrastructure.persistence.memory import (
+    InMemoryJournalEntryStore,
+    InMemoryMetadataSnapshotStore,
+)
 
 CONTRIBUTOR = Rfc("AAA010101AAA")
 EMISOR = Rfc("BBB010101BBB")
@@ -879,6 +883,75 @@ def test_a30_a_projection_with_no_document_is_a_calling_error_not_a_document_out
     assert harness.provider.asked == []
     assert harness.records == ()
     assert harness.clock.calls == 0
+
+
+# --- A31: the metadata join resolves the source state (§6:123/§8:159) -----------------------
+
+#: When the SAT was read (§6): a metadata observation's own instant, distinct from the posting's.
+RETRIEVED_AT = datetime(2026, 1, 20, 9, 30, tzinfo=UTC)
+
+
+def _observation(
+    status: FiscalDocumentStatus, *, retrieved_at: datetime = RETRIEVED_AT
+) -> MetadataSnapshot:
+    """The metadata fact M2.6 does not carry: the SAT's last word on one CFDI (§6)."""
+    return MetadataSnapshot(
+        uuid=UUID,
+        contributor_rfc=CONTRIBUTOR,
+        status=status,
+        retrieved_at=retrieved_at,
+        source_hash=SOURCE_HASH,
+    )
+
+
+def _harness_joined(*observations: MetadataSnapshot) -> _Harness:
+    """The use case wired with a metadata store holding ``observations`` (§6:123)."""
+    provider = _Provider()
+    store = InMemoryJournalEntryStore()
+    clock = _Clock()
+    snapshots = InMemoryMetadataSnapshotStore()
+    for observation in observations:
+        snapshots.append(observation)
+    return _Harness(
+        provider=provider,
+        store=store,
+        clock=clock,
+        use_case=ExecuteAccountingUseCase(
+            mapping=provider,
+            validator=PostingEligibilityValidator(provider, supported_rules=SUPPORTED_RULES),
+            store=store,
+            clock=clock,
+            snapshots=snapshots,
+        ),
+    )
+
+
+def test_a31_a_vigente_observation_resolves_the_unknown_status_and_the_document_posts() -> None:
+    """A31 §6:123/§8:159: M2.6's UNKNOWN is joined to the SAT's word, so eligibility follows it."""
+    harness = _harness_joined(_observation(FiscalDocumentStatus.VIGENTE))
+    result = harness.execute(_processed(_document(status=FiscalDocumentStatus.UNKNOWN)))
+
+    assert result.decision.posting_state is PostingState.POSTED
+    assert result.record is not None
+    assert result.record.posting_state is PostingState.POSTED
+
+
+def test_a31_a_cancelled_observation_refuses_the_document_the_projection_called_vigente() -> None:
+    """A31 §8:159: the SAT's cancellation outranks the projection's VIGENTE, so nothing posts."""
+    harness = _harness_joined(_observation(FiscalDocumentStatus.CANCELLED))
+    result = harness.execute(_processed(_document(status=FiscalDocumentStatus.VIGENTE)))
+
+    assert result.decision.posting_state is PostingState.PROPOSED
+    assert ReviewFlagType.INELIGIBLE_SOURCE_STATE in _flag_types(result)
+
+
+def test_a31_without_an_observation_the_document_stays_unresolved_and_nothing_is_posted() -> None:
+    """A31 §6:123: with no metadata fact there is no eligibility — UNKNOWN is never presumed."""
+    harness = _harness_joined()  # a store, but no observation for this CFDI
+    result = harness.execute(_processed(_document(status=FiscalDocumentStatus.UNKNOWN)))
+
+    assert result.decision.posting_state is PostingState.PROPOSED
+    assert ReviewFlagType.UNKNOWN_SOURCE_STATE in _flag_types(result)
 
 
 # --- T23: a REP is accounted against the ledger, not against what it states (§8:184/§8:192) --
