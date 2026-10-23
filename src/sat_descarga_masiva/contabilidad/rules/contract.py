@@ -30,12 +30,18 @@ legs, and never re-invents what a refusal looks like.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import date
 from typing import Protocol
 
 from sat_descarga_masiva.contabilidad.classification import Classification
-from sat_descarga_masiva.contabilidad.journal import JournalLine, ProposedJournalEntry
+from sat_descarga_masiva.contabilidad.journal import (
+    JournalEntryRecord,
+    JournalLine,
+    ProposedJournalEntry,
+)
+from sat_descarga_masiva.contabilidad.roles import AccountRole
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument
 from sat_descarga_masiva.domain.model.perspective import Perspective
 from sat_descarga_masiva.domain.model.review import ReviewFlag, ReviewFlagType
@@ -111,6 +117,21 @@ class PostingContext:
     reads nothing but its context, and it may not open a repository to learn what it reverses.
     The tuple is empty for every document that states no relation (§8:179–185), so nothing is
     queried for one that states none.
+
+    ``previous_entries`` is the cancellation seam of §8:194 and nothing else: the journal
+    records the client already holds for this source, read from the ledger *before* the rule
+    runs. A cancellation reversal is computed from the persisted accounting fact, never
+    re-derived from the source document, so the rule has to be handed the history it reverses.
+    Only ``POSTED`` records are reversal candidates: a ``PROPOSED`` refusal or a ``SKIPPED`` row
+    moved nothing and does not count. The tuple is empty for every document that is not
+    cancelled, so nothing is queried for one that is not.
+
+    ``cancellation_effective_on`` is the effective date §8:194 dates the reversal by: the
+    ``FechaCancelacion`` the latest metadata observation carries, which is the same fact the
+    fiscal-event contract turns into ``FiscalEvent.effective_at``. It is ``None`` whenever the
+    source is not cancelled or the observation states no date — and then no reversal is dated at
+    all, because §8a:209 forbids dating it by ``retrieved_at``, by the ``Fecha`` of the invoice or
+    by today.
     """
 
     contributor_rfc: Rfc
@@ -119,6 +140,8 @@ class PostingContext:
     classification: Classification | None = None
     posted_source_uuids: frozenset[Uuid] = frozenset()
     related_documents: tuple[RelatedDocument, ...] = ()
+    previous_entries: tuple[JournalEntryRecord, ...] = ()
+    cancellation_effective_on: date | None = None
 
 
 @dataclass(frozen=True)
@@ -167,11 +190,21 @@ class ReviewRequest:
     ``None`` only when the document itself cannot be keyed — §8:194 keys an entry by its
     source UUID and §8a:209 forbids inventing a date — so an undatable or unidentified
     document is flagged on the *document* rather than on an entry that could not exist.
+
+    ``accounts`` is the one thing a proposal may know and the mapping must not re-decide: a
+    reversal of a posted fact reverses the accounts that fact was posted to (§8:194), so the
+    historical resolution travels with the proposal instead of being asked of the chart as it
+    stands today. Every rule that resolves roles the ordinary way leaves it empty, and a refusal
+    then records no new account decision at all.
     """
 
     flags: tuple[ReviewFlag, ...]
     detail: str
     entry: ProposedJournalEntry | None = None
+    #: The accounts this proposal already names (§8:194). Empty for every rule that resolves
+    #: roles through the current mapping; non-empty only when the proposal reverses a recorded
+    #: fact and has to keep the accounts that fact used.
+    accounts: Mapping[AccountRole, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.flags:

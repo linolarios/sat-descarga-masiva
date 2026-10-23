@@ -452,6 +452,30 @@ def test_the_credit_note_rule_module_reads_the_engine_and_the_domain_only() -> N
     assert "sat_descarga_masiva.contabilidad.rules.posting" not in modules
 
 
+def test_the_cancellation_rule_module_reads_the_engine_and_the_domain_only() -> None:
+    """§4/§8:194: `cancellation.py` may not reach past its context for the history it reverses.
+
+    The posted record arrives as `PostingContext.previous_entries` and the cancellation's effective
+    date as `PostingContext.cancellation_effective_on`, so the rule may not open a journal store,
+    may not re-read the document's artifacts and may not import the registry that appends it. Its
+    imports are therefore the engine's own contract, journal vocabulary and roles, plus the domain
+    model.
+    """
+    modules = _imported_modules(
+        _package_sources()["rules/cancellation.py"], filename="cancellation.py"
+    )
+    assert not _forbidden_modules(modules)
+    assert not _external_modules(modules)
+    assert sorted(module for module in modules if module.startswith("sat_descarga_masiva")) == [
+        "sat_descarga_masiva.contabilidad.journal",
+        "sat_descarga_masiva.contabilidad.roles",
+        "sat_descarga_masiva.contabilidad.rules.contract",
+        "sat_descarga_masiva.domain.model.fiscal_document",
+        "sat_descarga_masiva.domain.model.review",
+    ]
+    assert "sat_descarga_masiva.contabilidad.rules.posting" not in modules
+
+
 def test_the_shared_amounts_module_depends_on_neither_rule_family() -> None:
     """§8: the arithmetic is shared, so it may not depend on the rows that share it."""
     modules = _imported_modules(_package_sources()["rules/amounts.py"], filename="amounts.py")

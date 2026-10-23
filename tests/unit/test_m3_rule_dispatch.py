@@ -21,6 +21,7 @@ import pytest
 from sat_descarga_masiva.contabilidad.classification import Classification
 from sat_descarga_masiva.contabilidad.journal import AccountingAssumption, ProposedJournalEntry
 from sat_descarga_masiva.contabilidad.roles import AccountRole
+from sat_descarga_masiva.contabilidad.rules.cancellation import CANCELLATION_RULE_VERSIONS
 from sat_descarga_masiva.contabilidad.rules.contract import (
     PostingContext,
     RelatedDocument,
@@ -247,6 +248,11 @@ def test_the_registry_holds_the_income_rows_for_both_sides() -> None:
 
     The REP rows are the wildcard ``None``: §8:192 gives a `P` comprobante no header ``MetodoPago``
     to select on, so the registry states that instead of a method the document never carries.
+
+    The cancellation rows (4.15a/4.15b) are *not* in `POSTING_RULES`: that table selects a shape,
+    and a cancellation is a fiscal state. They are nevertheless registered, because the validator
+    refuses a decision carrying an id the engine does not know (§8:159), so `SUPPORTED_RULES` is the
+    shape table plus §8:194's row ids.
     """
     assert {row.rule_id for row in POSTING_RULES} == {
         "4.1",
@@ -260,7 +266,9 @@ def test_the_registry_holds_the_income_rows_for_both_sides() -> None:
         "4.8",
         "4.9",
     }
-    assert {row.rule_id: row.rule_version for row in POSTING_RULES} == SUPPORTED_RULES
+    registered = {row.rule_id: row.rule_version for row in POSTING_RULES}
+    assert {**registered, **CANCELLATION_RULE_VERSIONS} == SUPPORTED_RULES
+    assert set(SUPPORTED_RULES) >= {"4.15a", "4.15b"}
     assert {str(row.metodo_pago) for row in POSTING_RULES} == {"PUE", "PPD", "None"}
 
 

@@ -36,6 +36,7 @@ M3_FLAGS = {
     "MISSING_REP_ORIGINAL": "missing_rep_original",
     "REP_INVARIANT_VIOLATION": "rep_invariant_violation",
     "PAYROLL_DRAFT_UNSUPPORTED": "payroll_draft_unsupported",
+    "CANCELLED_AFTER_POSTING": "cancelled_after_posting",
     "RETENCION_DRAFT_UNSUPPORTED": "retencion_draft_unsupported",
     "INELIGIBLE_SOURCE_STATE": "ineligible_source_state",
     "UNKNOWN_SOURCE_STATE": "unknown_source_state",

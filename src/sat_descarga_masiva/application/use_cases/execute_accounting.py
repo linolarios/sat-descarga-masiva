@@ -1,9 +1,9 @@
 """ExecuteAccountingUseCase — the M3 accounting stage, one document at a time (§8/§11 M3).
 
-Orchestration only. §8's rules 4.1/4.2/4.3/4.4, §8:161's out-of-scope skips (4.11/4.12/4.14)
-and the `PostingEligibilityValidator` already exist and already decide everything; this module
-adds no accounting judgment of its own. It *sequences* them for one projected document and
-writes the single record the decision produced.
+Orchestration only. §8's rules 4.1/4.2/4.3/4.4, §8:161's out-of-scope skips (4.11/4.12/4.14),
+§8:194's cancellation rows (4.15a/4.15b) and the `PostingEligibilityValidator` already exist and
+already decide everything; this module adds no accounting judgment of its own. It *sequences* them
+for one projected document and writes the single record the decision produced.
 
 The sequence, and why each step sits where it does:
 
@@ -31,6 +31,11 @@ The sequence, and why each step sits where it does:
   `SKIPPED` row moved nothing, so a collection against it would have no receivable to settle. The
   set is built per document and only when the document actually states related documents, so an
   ordinary comprobante costs no query at all.
+- **the cancellation history is read, and only for a cancellation.** §8:194's 4.15 rows need the
+  client's own history for the source before they can choose between a `SKIPPED` row and a
+  compensating reversal, so the store is asked for that source's records — once, and only when the
+  latest observation is `CANCELLED`. No line, side or account is computed here: the reversal is the
+  rule's arithmetic, computed from the persisted fact.
 - **classification happens only where it means something.** §8a:207's
   ``ClaveProdServ → AccountingCategory`` answer is a precondition of the *received* rules
   (4.3/4.4), whose base role §8's row does not fix. An emitted document or a non-``I``
@@ -55,6 +60,7 @@ boundary — the same seam M2.8's per-document transaction uses.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import date
 from decimal import Decimal
 
 from sat_descarga_masiva.application.ports.accounting import AccountMapping, MappingProvider
@@ -76,7 +82,7 @@ from sat_descarga_masiva.contabilidad.validator import (
 )
 from sat_descarga_masiva.domain.enums.comprobante import TipoComprobante
 from sat_descarga_masiva.domain.errors import UnbalancedJournalCommit
-from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument
+from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument, FiscalDocumentStatus
 from sat_descarga_masiva.domain.model.perspective import Perspective
 from sat_descarga_masiva.domain.model.review import ReviewFlags
 from sat_descarga_masiva.domain.model.source import ExtractedXml
@@ -135,7 +141,8 @@ class ExecuteAccountingUseCase:
         left to the document's own review state (§8:167) and never reaches the ledger.
         """
         document = _projectable_document(processed)
-        document = _with_resolved_status(document, contributor_rfc, self._snapshots)
+        fiscal = _with_resolved_status(document, contributor_rfc, self._snapshots)
+        document = fiscal.document
         merged = replace(document, review_flags=_merged_review_flags(processed, document))
         mapping = self._mapping.mapping_for(contributor_rfc)
         context = _posting_context(
@@ -145,6 +152,7 @@ class ExecuteAccountingUseCase:
             mapping,
             self._store,
             related=_related_documents(document, contributor_rfc, self._store, self._sources),
+            cancellation_effective_on=fiscal.cancellation_effective_on,
         )
         decision = self._validator.decide(context, propose(context), mapping=mapping)
         if decision.entry is None:
@@ -172,25 +180,45 @@ def _projectable_document(processed: ProcessedDocument) -> FiscalDocument:
     return processed.document
 
 
+@dataclass(frozen=True)
+class _FiscalState:
+    """One document as the ledger sees it, plus §8:194's cancellation date when there is one.
+
+    ``cancellation_effective_on`` is the latest *cancelled* observation's ``FechaCancelacion`` —
+    the same fact `contabilidad.fiscal_state` turns into ``FiscalEvent.effective_at`` — and never
+    the retrieval instant, the invoice's ``Fecha`` or today (§8a:203/209). It stays `None` for
+    every other observation, so no rule can date a reversal by a guess.
+    """
+
+    document: FiscalDocument
+    cancellation_effective_on: date | None = None
+
+
 def _with_resolved_status(
     document: FiscalDocument, contributor_rfc: Rfc, snapshots: MetadataSnapshotStore | None
-) -> FiscalDocument:
+) -> _FiscalState:
     """Resolve the document's fiscal status from its latest metadata observation (§6:123).
 
     M2.6 leaves a projected document ``UNKNOWN`` — no metadata has been read yet — and §8:159
     refuses exactly that. The accounting stage is where the observation is joined in: the
     document is booked against whatever the SAT last said about it, so a VIGENTE observation lets
-    it post while a CANCELLED one refuses it. With no store wired, or no observation for this
-    document, the status is left untouched, so an unresolved document stays ``UNKNOWN`` and is
-    never posted on a presumption (never guess, §5/§6). The *latest* observation is the authority
-    (§6), so it always wins — including over M2.6's ``UNKNOWN``.
+    it post while a CANCELLED one hands the decision to §8:194's rows. With no store wired, or no
+    observation for this document, the status is left untouched, so an unresolved document stays
+    ``UNKNOWN`` and is never posted on a presumption (never guess, §5/§6). The *latest*
+    observation is the authority (§6), so it always wins — including over M2.6's ``UNKNOWN``.
+
+    The cancellation date travels beside the document rather than inside it: §8:194's reversal is
+    dated by the cancellation's effective date, and the document's own ``fecha`` is the invoice's.
     """
     if snapshots is None or document.source_uuid is None:
-        return document
+        return _FiscalState(document)
     snapshot = snapshots.latest_for(contributor_rfc, document.source_uuid)
     if snapshot is None:
-        return document
-    return replace(document, status=snapshot.status)
+        return _FiscalState(document)
+    resolved = replace(document, status=snapshot.status)
+    if snapshot.status is not FiscalDocumentStatus.CANCELLED:
+        return _FiscalState(resolved)
+    return _FiscalState(resolved, cancellation_effective_on=snapshot.cancellation_date)
 
 
 def _merged_review_flags(processed: ProcessedDocument, document: FiscalDocument) -> ReviewFlags:
@@ -211,11 +239,18 @@ def _posting_context(  # noqa: PLR0913, PLR0917 (the context is assembled from t
     mapping: AccountMapping,
     store: JournalEntryStore,
     related: tuple[RelatedDocument, ...],
+    cancellation_effective_on: date | None = None,
 ) -> PostingContext:
     """The engine's view of one document: whose books, which document, as whom (§8).
 
     ``document`` is the one already carrying §6's merged review state, so the context the rule
     and the validator both read is the same object and neither can see a different document.
+
+    ``previous_entries`` is §8:194's cancellation seam: the client's own accounting history for
+    this source, read once here because a rule may read nothing but its context. It is populated
+    only for a *cancelled* source — nothing is queried for a document the SAT has not cancelled —
+    and it is handed over whole: which records are reversal candidates (``POSTED`` only, at most
+    one) is accounting policy and belongs to the rule.
     """
     return PostingContext(
         contributor_rfc=contributor_rfc,
@@ -224,7 +259,27 @@ def _posting_context(  # noqa: PLR0913, PLR0917 (the context is assembled from t
         classification=_classification_for(processed, document, mapping),
         posted_source_uuids=_posted_source_uuids(document, contributor_rfc, store),
         related_documents=related,
+        previous_entries=_previous_entries(document, contributor_rfc, store),
+        cancellation_effective_on=cancellation_effective_on,
     )
+
+
+def _previous_entries(
+    document: FiscalDocument, contributor_rfc: Rfc, store: JournalEntryStore
+) -> tuple[JournalEntryRecord, ...]:
+    """§8:194's history: every record the client's books hold for this source, or none.
+
+    A reversal is computed from the persisted accounting fact, so the rule has to be handed the
+    history — but only a cancelled source needs it, and asking for one that is merely ``VIGENTE``
+    (or ``UNKNOWN``) would cost a query per document for an answer no rule reads.
+
+    No filtering happens here: the store's reader answers by source, and the rule decides which
+    states are reversal candidates (§8:194) — the seam resolves *facts*, the rule makes the
+    *accounting* judgment.
+    """
+    if document.status is not FiscalDocumentStatus.CANCELLED or document.source_uuid is None:
+        return ()
+    return store.for_source(contributor_rfc, document.source_uuid)
 
 
 @dataclass(frozen=True)

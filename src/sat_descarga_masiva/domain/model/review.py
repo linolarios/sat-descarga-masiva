@@ -46,6 +46,12 @@ class ReviewFlagType(StrEnum):
     MISSING_REP_ORIGINAL = "missing_rep_original"
     REP_INVARIANT_VIOLATION = "rep_invariant_violation"
     PAYROLL_DRAFT_UNSUPPORTED = "payroll_draft_unsupported"
+    # Rule 4.15 cancellation reversal (§8:194): the source was already POSTED and has since been
+    # cancelled, and the rule proposed the exact compensating reversal. A human accepts it before
+    # it becomes an accounting fact. Never used for a cancellation before posting (that is a
+    # SKIPPED entry), for an unknown status, a missing observation or an unread payment history.
+    CANCELLED_AFTER_POSTING = "cancelled_after_posting"
+
     RETENCION_DRAFT_UNSUPPORTED = "retencion_draft_unsupported"
 
     # The source-state gate at posting time — the latest *known* status (§8:159/194).

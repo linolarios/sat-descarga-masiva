@@ -168,6 +168,7 @@ class _Harness:
     store: InMemoryJournalEntryStore
     clock: _Clock
     use_case: ExecuteAccountingUseCase
+    snapshots: InMemoryMetadataSnapshotStore | None = None
 
     def execute(
         self, processed: ProcessedDocument, *, contributor_rfc: Rfc = CONTRIBUTOR
@@ -483,17 +484,10 @@ def test_a8_an_issued_payroll_draft_names_a_zero_line_entry_never_a_skip() -> No
     assert _flag_types(result) == [ReviewFlagType.PAYROLL_DRAFT_UNSUPPORTED]
 
 
-@pytest.mark.parametrize(
-    "status",
-    [FiscalDocumentStatus.UNKNOWN, FiscalDocumentStatus.CANCELLED],
-    ids=["unknown", "cancelled"],
-)
-def test_a14_an_unresolved_source_state_is_refused_and_the_refusal_is_recorded(
-    status: FiscalDocumentStatus,
-) -> None:
+def test_a14_an_unresolved_source_state_is_refused_and_the_refusal_is_recorded() -> None:
     """A14 §8:159/§8:194: nothing uncertain is posted, and the entry it refused is explainable."""
     harness = _harness()
-    result = harness.execute(_processed(_document(status=status)))
+    result = harness.execute(_processed(_document(status=FiscalDocumentStatus.UNKNOWN)))
 
     record = _assert_proposed_record(result, harness)
     assert record.posting_state is not PostingState.POSTED
@@ -502,6 +496,25 @@ def test_a14_an_unresolved_source_state_is_refused_and_the_refusal_is_recorded(
         (AccountRole.IVA_ACRED_PAGADO, LineSide.DEBE, "16.00", None),
         (AccountRole.CLEARING, LineSide.HABER, "116.00", None),
     ]
+
+
+def test_a14_a_cancelled_document_is_skipped_not_refused() -> None:
+    """A14 §8:194: a cancelled source with no posted history is 4.15a — a skip, not a refusal.
+
+    The projection can already carry ``CANCELLED`` (the metadata join is one way to learn it), and
+    what the engine owes it is the *same* answer: nothing was posted, so nothing is reversed and no
+    human decision is needed (§8:161).
+    """
+    harness = _harness()
+    result = harness.execute(_processed(_document(status=FiscalDocumentStatus.CANCELLED)))
+
+    assert result.decision.posting_state is PostingState.SKIPPED
+    assert result.decision.review_flags == ()
+    assert _entry(result.decision) is not None
+    assert _entry(result.decision).rule_id == "4.15a"
+    assert result.record is not None
+    assert result.record.lines == ()
+    assert harness.records == (result.record,)
 
 
 def test_a15_a_foreign_currency_document_is_refused_unless_its_rate_is_resolved() -> None:
@@ -903,7 +916,10 @@ RETRIEVED_AT = datetime(2026, 1, 20, 9, 30, tzinfo=UTC)
 
 
 def _observation(
-    status: FiscalDocumentStatus, *, retrieved_at: datetime = RETRIEVED_AT
+    status: FiscalDocumentStatus,
+    *,
+    retrieved_at: datetime = RETRIEVED_AT,
+    cancellation_date: date | None = None,
 ) -> MetadataSnapshot:
     """The metadata fact M2.6 does not carry: the SAT's last word on one CFDI (§6)."""
     return MetadataSnapshot(
@@ -912,6 +928,7 @@ def _observation(
         status=status,
         retrieved_at=retrieved_at,
         source_hash=SOURCE_HASH,
+        cancellation_date=cancellation_date,
     )
 
 
@@ -934,6 +951,7 @@ def _harness_joined(*observations: MetadataSnapshot) -> _Harness:
             clock=clock,
             snapshots=snapshots,
         ),
+        snapshots=snapshots,
     )
 
 
@@ -947,13 +965,23 @@ def test_a31_a_vigente_observation_resolves_the_unknown_status_and_the_document_
     assert result.record.posting_state is PostingState.POSTED
 
 
-def test_a31_a_cancelled_observation_refuses_the_document_the_projection_called_vigente() -> None:
-    """A31 §8:159: the SAT's cancellation outranks the projection's VIGENTE, so nothing posts."""
+def test_a31_a_cancelled_observation_skips_a_source_that_was_never_posted() -> None:
+    """A31 §8:159/194: the SAT's cancellation outranks the projection's VIGENTE.
+
+    Nothing was posted, so there is no fact to reverse: 4.15a answers with ``SKIPPED`` and the
+    entry carries no legs. The cancellation's own date is not invented either — with no
+    ``FechaCancelacion`` the document's ``Fecha`` dates the record (§8a:209).
+    """
     harness = _harness_joined(_observation(FiscalDocumentStatus.CANCELLED))
     result = harness.execute(_processed(_document(status=FiscalDocumentStatus.VIGENTE)))
 
-    assert result.decision.posting_state is PostingState.PROPOSED
-    assert ReviewFlagType.INELIGIBLE_SOURCE_STATE in _flag_types(result)
+    assert result.decision.posting_state is PostingState.SKIPPED
+    assert result.decision.review_flags == ()
+    assert _entry(result.decision) is not None
+    assert _entry(result.decision).rule_id == "4.15a"
+    assert result.record is not None
+    assert result.record.lines == ()
+    assert ReviewFlagType.INELIGIBLE_SOURCE_STATE not in _flag_types(result)
 
 
 def test_a31_without_an_observation_the_document_stays_unresolved_and_nothing_is_posted() -> None:
@@ -963,6 +991,101 @@ def test_a31_without_an_observation_the_document_stays_unresolved_and_nothing_is
 
     assert result.decision.posting_state is PostingState.PROPOSED
     assert ReviewFlagType.UNKNOWN_SOURCE_STATE in _flag_types(result)
+
+
+# --- T1/T2: §8:194's cancellation reversal, end to end (§8:166/194) ---------------------
+
+#: The cancellation's effective date: later than the invoice and the posting, and never either.
+CANCELLED_ON = date(2026, 2, 3)
+#: A later observation instant, so the *latest* fact is the cancellation (§6:123).
+CANCELLED_AT = datetime(2026, 2, 4, 9, 30, tzinfo=UTC)
+
+
+def _posted(harness: _Harness) -> JournalEntryRecord:
+    """Post the purchase once and hand back the durable fact the reversal must mirror."""
+    result = harness.execute(_processed(_document()))
+    assert result.record is not None, result.decision
+    assert result.record.posting_state is PostingState.POSTED
+    return result.record
+
+
+def _cancel(harness: _Harness, *, cancellation_date: date | None) -> None:
+    """Append the SAT's later cancellation, the fact 4.15 is written for (§6)."""
+    assert harness.snapshots is not None, "this harness has no metadata store wired"
+    harness.snapshots.append(
+        _observation(
+            FiscalDocumentStatus.CANCELLED,
+            retrieved_at=CANCELLED_AT,
+            cancellation_date=cancellation_date,
+        )
+    )
+
+
+def test_a34_a_cancellation_after_posting_appends_an_exact_reversal() -> None:
+    """A34 §8:166/194: the posted fact is permanent, so the correction is a new mirror entry."""
+    harness = _harness_joined(_observation(FiscalDocumentStatus.VIGENTE))
+    original = _posted(harness)
+
+    _cancel(harness, cancellation_date=CANCELLED_ON)
+    result = harness.execute(_processed(_document()))
+
+    assert result.decision.posting_state is PostingState.PROPOSED
+    assert _flag_types(result) == [ReviewFlagType.CANCELLED_AFTER_POSTING]
+    assert result.record is not None
+    assert result.record.rule_id == "4.15b"
+    assert result.record.entry_date == CANCELLED_ON
+    assert _legs(result.record) == [
+        (AccountRole.GASTO, LineSide.HABER, "100.00", "601-001"),
+        (AccountRole.IVA_ACRED_PAGADO, LineSide.HABER, "16.00", "118-001"),
+        (AccountRole.CLEARING, LineSide.DEBE, "116.00", "102-099"),
+    ]
+    assert [line.resolved_account for line in result.record.lines] == [
+        line.resolved_account for line in original.lines
+    ]
+
+
+def test_a34_the_original_posting_stays_exactly_as_it_was_recorded() -> None:
+    """A34 §8:166: append-only means the reversal cannot rewrite the fact it compensates."""
+    harness = _harness_joined(_observation(FiscalDocumentStatus.VIGENTE))
+    original = _posted(harness)
+
+    _cancel(harness, cancellation_date=CANCELLED_ON)
+    harness.execute(_processed(_document()))
+
+    assert harness.store.get(original.entry_key) == original
+    assert original.posting_state is PostingState.POSTED
+    assert original.entry_date == date(2024, 5, 15)
+
+
+def test_a35_a_retried_cancellation_is_the_same_record_not_a_second_one() -> None:
+    """A35 §8:194: the retry derives the identical key, so the append is a no-op."""
+    harness = _harness_joined(_observation(FiscalDocumentStatus.VIGENTE))
+    _posted(harness)
+
+    _cancel(harness, cancellation_date=CANCELLED_ON)
+    first = harness.execute(_processed(_document()))
+    second = harness.execute(_processed(_document()))
+
+    assert first.record is not None
+    assert second.record == first.record
+    assert second.record.entry_key == first.record.entry_key
+    assert len(harness.records) == 2  # the original posting and the one reversal
+
+
+def test_a36_a_cancellation_with_no_effective_date_writes_nothing() -> None:
+    """A36 §8a:203 + §8:167: an undated reversal is never invented, so nothing is appended."""
+    harness = _harness_joined(_observation(FiscalDocumentStatus.VIGENTE))
+    original = _posted(harness)
+
+    _cancel(harness, cancellation_date=None)
+    result = harness.execute(_processed(_document()))
+
+    assert result.decision.posting_state is PostingState.PROPOSED
+    assert result.decision.entry is None
+    assert result.record is None
+    assert _flag_types(result) == [ReviewFlagType.MISSING_SOURCE_FIELD]
+    assert harness.records == (original,)
+    assert harness.clock.calls == 1  # only the original posting was dated
 
 
 # --- T23: a REP is accounted against the ledger, not against what it states (§8:184/§8:192) --

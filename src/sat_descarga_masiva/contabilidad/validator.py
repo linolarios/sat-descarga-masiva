@@ -50,6 +50,7 @@ from sat_descarga_masiva.contabilidad.journal import (
     ProposedJournalEntry,
 )
 from sat_descarga_masiva.contabilidad.roles import AccountRole
+from sat_descarga_masiva.contabilidad.rules.cancellation import CANCELLATION_SKIP_RULE_IDS
 from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, ReviewRequest, Skip
 from sat_descarga_masiva.contabilidad.rules.scope import OUT_OF_SCOPE_RULES
 from sat_descarga_masiva.domain.enums.comprobante import TipoComprobante
@@ -67,8 +68,10 @@ POLICY_VERSION = "1"
 #: at the source's own rate.
 _NATIONAL_CURRENCY = "MXN"
 
-#: §8:161's out-of-scope rule ids: the only `Skip`s the engine may record as `SKIPPED`.
-_SKIP_RULE_IDS = frozenset(rule.rule_id for rule in OUT_OF_SCOPE_RULES)
+#: §8:161's out-of-scope rule ids, plus 4.15a: a source cancelled before it was ever posted moved
+#: nothing either. The set stays closed and exhaustive — a skip is honoured only for an id named
+#: here, so no rule can reach `SKIPPED` by inventing one.
+_SKIP_RULE_IDS = frozenset(rule.rule_id for rule in OUT_OF_SCOPE_RULES) | CANCELLATION_SKIP_RULE_IDS
 
 
 #: The one-word refusal helper every condition below shares, so each flag's reason is written
@@ -280,6 +283,10 @@ class PostingEligibilityValidator:
         pile reasons onto a decision that is `NEEDS_REVIEW` regardless (§8:167). The entry
         stays ``PROPOSED`` even when it balances: a rule asking for review has said its
         calculation is not the whole treatment (§8a:212), and no validator may overrule that.
+
+        ``accounts`` travels when the rule already named them: a 4.15b reversal books the accounts
+        the original was *posted* to (§8:194), so the chart is not consulted a second time and a
+        later mapping change cannot rewrite what the reversal settles against.
         """
         return PostingDecision(
             entry=review.entry,
@@ -287,6 +294,7 @@ class PostingEligibilityValidator:
             mapping_version=mapping.mapping_version,
             policy_version=self._policy_version,
             review_flags=review.flags,
+            accounts=dict(review.accounts),
         )
 
     def _post(

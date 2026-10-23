@@ -34,9 +34,11 @@ a document that cannot be dated or identified is refused before anything is comp
 posts unless `Total == base + IVA` holds, which is what makes the proposed entry balance.
 
 `propose(request)` is the engine's one door per document — skip, propose, or review
-(§8:161/173) — so the pipeline asks one question and gets one of the three answers. It consults
-§8:161's out-of-scope table (`scope.py`) first, then §8a:205's draft table (`drafts.py`, the `N`/`R`
-**emitido** drafts) — the two "tables of decided refusals", adjacent so neither can quietly grow.
+(§8:161/173) — so the pipeline asks one question and gets one of the three answers. It asks
+§8:194's cancellation rows first (`cancellation.py`), because a cancelled source's answer depends on
+whether it was ever posted and not on its shape; then §8:161's out-of-scope table (`scope.py`), then
+§8a:205's draft table (`drafts.py`, the `N`/`R` **emitido** drafts) — the two "tables of decided
+refusals", adjacent so neither can quietly grow.
 The rows it walks are this module's `I` rows plus §8's REP rows from `reposting.py` (4.5a/4.5b), in
 one ordered tuple: a `P` comprobante is claimed by its own row and by nothing here.
 """
@@ -66,6 +68,10 @@ from sat_descarga_masiva.contabilidad.rules.amounts import (
     TOTAL_KEY,
     BaseAmounts,
     base_amounts,
+)
+from sat_descarga_masiva.contabilidad.rules.cancellation import (
+    CANCELLATION_RULE_VERSIONS,
+    cancellation,
 )
 from sat_descarga_masiva.contabilidad.rules.contract import (
     _PRECONDITION_DETAIL,
@@ -401,20 +407,34 @@ POSTING_RULES: tuple[RuleRow, ...] = (
     *CREDIT_NOTE_ROWS,
 )
 
-#: The engine's registry as the validator is wired with it: ``rule_id`` → current version.
-SUPPORTED_RULES: dict[str, str] = {row.rule_id: row.rule_version for row in POSTING_RULES}
+#: The engine's registry as the validator is wired with it: ``rule_id`` → current version. §8:194's
+#: cancellation rows are registered beside the shape-driven rows because they answer under their own
+#: ids, even though `POSTING_RULES` (a *shape* table) never claims a document: the fiscal state is
+#: asked first, and the registry has to know every id a decision may carry.
+SUPPORTED_RULES: dict[str, str] = {
+    **{row.rule_id: row.rule_version for row in POSTING_RULES},
+    **CANCELLATION_RULE_VERSIONS,
+}
 
 
-def propose(request: PostingContext) -> Proposal:
+def propose(request: PostingContext) -> Proposal:  # noqa: PLR0911 (three answers, plus refusal paths)
     """The engine's one door per document (§8:161/173): skip it, propose it, or review it.
 
-    ``SKIPPED`` is reachable only through §8:161's out-of-scope table; §8a:205's drafts
+    §8:194's cancellation rows come first, because a cancelled source's accounting answer is a
+    statement about a *state*, not about a document shape: whether it was ever posted decides
+    between a ``SKIPPED`` row (4.15a) and a compensating reversal (4.15b), and no shape rule may
+    speak for a source the SAT has cancelled.
+
+    ``SKIPPED`` is reachable only through §8:161's out-of-scope table or 4.15a; §8a:205's drafts
     (`drafts.py`, the ``N``/``R`` **emitido** cases) come next, and they are keyed zero-line
     `ReviewRequest`s. A document no rule claims and no draft table holds is then a
     *document-level* `ReviewRequest` — never a silent skip, and never a guess: no rule owns its
     shape, so there is no §8 number to key an entry by and the review fact belongs to the
     document itself (§8:167).
     """
+    cancelled = cancellation(request)
+    if cancelled is not None:
+        return cancelled
     skip = out_of_scope(request)
     if skip is not None:
         return skip

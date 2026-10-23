@@ -118,7 +118,9 @@ def test_the_context_is_exactly_the_books_the_document_the_perspective_and_class
     itself would stop being a pure function of its context. ``related_documents`` follows the
     same rule for §8a:212: a credit note is selected by its **original's** ``MetodoPago``, which
     the note does not carry, so the original's resolved facts arrive here rather than through a
-    repository read inside the rule.
+    repository read inside the rule. ``previous_entries`` and ``cancellation_effective_on`` are
+    §8:194's pair for the same reason: a reversal is computed from the client's own posted history
+    and dated by the cancellation, so both facts are resolved before the rule runs.
     """
     assert [field.name for field in fields(PostingContext)] == [
         "contributor_rfc",
@@ -127,6 +129,8 @@ def test_the_context_is_exactly_the_books_the_document_the_perspective_and_class
         "classification",
         "posted_source_uuids",
         "related_documents",
+        "previous_entries",
+        "cancellation_effective_on",
     ]
 
 
