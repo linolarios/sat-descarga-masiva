@@ -1,4 +1,9 @@
-"""Technical-failure hierarchy (expected SAT states are Results, not exceptions)."""
+"""Technical-failure hierarchy.
+
+Request-lifecycle states (Accepted/Processing/Terminated) are Results. A terminal
+SAT failure (Error/Rejected/Expired, or an aborting event code) is not a usable
+result: M1-H raises SatRequestFailedError instead.
+"""
 
 from __future__ import annotations
 
@@ -37,6 +42,28 @@ class UnexpectedSatResponseError(SatClientError):
 
     def __init__(self, message: str, *, cod_estatus: str = "", mensaje: str = "") -> None:
         super().__init__(message)
+        self.cod_estatus = cod_estatus
+        self.mensaje = mensaje
+
+
+class SatRequestFailedError(SatClientError):
+    """SAT reported a terminal failure; retrying the request cannot help.
+
+    Carries only non-secret SAT context (the EstadoSolicitud value, the SAT code
+    and its Mensaje) so a live failure is diagnosable without leaking credentials
+    (AGENT.md 6a).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        estado_solicitud: int | None = None,
+        cod_estatus: str = "",
+        mensaje: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.estado_solicitud = estado_solicitud
         self.cod_estatus = cod_estatus
         self.mensaje = mensaje
 

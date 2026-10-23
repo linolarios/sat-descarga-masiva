@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sat_descarga_masiva.application.policies.backoff import PollingPolicy
+from sat_descarga_masiva.application.policies.sat_status import classify_verification
 from sat_descarga_masiva.application.ports.gateways import (
     AuthenticationGateway,
     DownloadGateway,
@@ -15,20 +16,28 @@ from sat_descarga_masiva.application.ports.services import (
     Clock,
     Sleeper,
 )
-from sat_descarga_masiva.domain.enums.request_state import RequestState
-from sat_descarga_masiva.domain.errors import SatTimeoutError, UnexpectedSatResponseError
+from sat_descarga_masiva.domain.enums.sat_status import ErrorClassification
+from sat_descarga_masiva.domain.errors import (
+    AuthenticationError,
+    SatRequestFailedError,
+    SatTimeoutError,
+    UnexpectedSatResponseError,
+)
 from sat_descarga_masiva.domain.model.credentials import SigningIdentity
 from sat_descarga_masiva.domain.model.query import DownloadQuery
 from sat_descarga_masiva.domain.model.results import DownloadOutcome, VerificationResult
 from sat_descarga_masiva.domain.model.token import AccessToken
 from sat_descarga_masiva.domain.model.value_objects import RequestId, Rfc
 
-# Terminal states produce no further packages; ACCEPTED/PROCESSING keep polling.
-_TERMINAL_STATES = (
-    RequestState.COMPLETED,
-    RequestState.ERROR,
-    RequestState.REJECTED,
-    RequestState.EXPIRED,
+# Actions that end the poll loop without an error: proceed, or a clean terminal
+# (nothing found / limit reached) that yields no packages.
+_CLEAN_TERMINALS = frozenset(
+    {
+        ErrorClassification.OK,
+        ErrorClassification.NOT_FOUND,
+        ErrorClassification.PARTITION,
+        ErrorClassification.QUOTA_WAIT,
+    }
 )
 
 
@@ -75,10 +84,9 @@ class ExecuteDownloadUseCase:
         self._repository.save(request_id)
 
         verification = self._wait_for_resolution(request_id, query.rfc_solicitante, token)
-        if verification.state is not RequestState.COMPLETED:
-            # Existing contract: a non-COMPLETED terminal request yields no
-            # packages (no exception). The request_id is still surfaced for
-            # correlation/tracking.
+        if classify_verification(verification) is not ErrorClassification.OK:
+            # Clean terminal (no results / limit reached): nothing to download.
+            # The request_id is still surfaced for correlation/tracking.
             return DownloadOutcome(request_id=request_id, state=verification.state, packages=())
         return DownloadOutcome(
             request_id=request_id,
@@ -92,14 +100,34 @@ class ExecuteDownloadUseCase:
     def _wait_for_resolution(
         self, request_id: RequestId, rfc: Rfc, token: AccessToken
     ) -> VerificationResult:
-        """Poll until a terminal state, honoring backoff and the poll timeout."""
+        """Poll until classification resolves the request, honoring backoff and the timeout."""
         attempt = 0
         deadline = self._clock.now() + self._polling.timeout
         while True:
             result = self._verifier.verify(request_id, rfc, token)
-            if result.state in _TERMINAL_STATES:
+            action = classify_verification(result)
+            if action is ErrorClassification.RETRY:
+                if self._clock.now() >= deadline:
+                    raise SatTimeoutError("verification did not resolve before the deadline")
+                self._sleeper.sleep(self._backoff.delay(attempt))
+                attempt += 1
+                continue
+            if action in _CLEAN_TERMINALS:
                 return result
-            if self._clock.now() >= deadline:
-                raise SatTimeoutError("verification did not resolve before the deadline")
-            self._sleeper.sleep(self._backoff.delay(attempt))
-            attempt += 1
+            raise _terminal_failure(action, result)
+
+
+def _terminal_failure(action: ErrorClassification, result: VerificationResult) -> Exception:
+    """Build the secret-free exception for a permanent SAT outcome (AGENT.md 6a)."""
+    cod = result.cod_estatus.value
+    if action is ErrorClassification.AUTHENTICATION:
+        return AuthenticationError(
+            f"SAT rejected the credentials or certificate "
+            f"(EstadoSolicitud {int(result.state)}, CodEstatus {cod})"
+        )
+    return SatRequestFailedError(
+        f"SAT reported a terminal failure (EstadoSolicitud {int(result.state)}, CodEstatus {cod})",
+        estado_solicitud=int(result.state),
+        cod_estatus=cod,
+        mensaje=result.mensaje,
+    )

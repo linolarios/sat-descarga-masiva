@@ -61,6 +61,16 @@ class ReviewFlagType(StrEnum):
     FX_DIFFERENCE_UNCONFIRMED = "fx_difference_unconfirmed"
     PARTIAL_PAYMENT_REVERSAL_UNSPECIFIED = "partial_payment_reversal_unspecified"
 
+    # §8a:212 credit notes — the two evidence gaps this milestone cannot observe, and the four
+    # relation facts that keep a note from being claimed at all. The first two are *blocking*: an
+    # entry is produced and may not post. The rest are refusals a human resolves.
+    EGRESO_RELATION_MISSING = "egreso_relation_missing"
+    EGRESO_MULTIPLE_ORIGINALS = "egreso_multiple_originals"
+    EGRESO_ORIGINAL_NOT_FOUND = "egreso_original_not_found"
+    EGRESO_ORIGINAL_NOT_POSTED = "egreso_original_not_posted"
+    EGRESO_EXCEEDS_ORIGINAL = "egreso_exceeds_original"
+    EGRESO_PAYMENT_HISTORY_UNAVAILABLE = "egreso_payment_history_unavailable"
+
 
 class ReviewFlagState(StrEnum):
     OPEN = "open"

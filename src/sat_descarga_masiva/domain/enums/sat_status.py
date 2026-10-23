@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from sat_descarga_masiva.domain.enums.request_state import RequestState
+
 
 class ErrorClassification(Enum):
     OK = "ok"
@@ -42,3 +44,18 @@ class SatStatusCode:
     @property
     def classification(self) -> ErrorClassification:
         return _CLASSIFY.get(self.value, ErrorClassification.UNKNOWN)
+
+
+_STATE_CLASSIFICATION: dict[RequestState, ErrorClassification] = {
+    RequestState.ACCEPTED: ErrorClassification.RETRY,
+    RequestState.PROCESSING: ErrorClassification.RETRY,
+    RequestState.COMPLETED: ErrorClassification.OK,
+    RequestState.ERROR: ErrorClassification.FATAL,
+    RequestState.REJECTED: ErrorClassification.FATAL,
+    RequestState.EXPIRED: ErrorClassification.FATAL,
+}
+
+
+def classify_state(state: RequestState) -> ErrorClassification:
+    """Map EstadoSolicitud onto the same action vocabulary as the event codes."""
+    return _STATE_CLASSIFICATION[state]

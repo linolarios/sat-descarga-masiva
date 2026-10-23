@@ -375,8 +375,10 @@ def test_a25_the_new_stage_depends_inward_only() -> None:
     assert not _external_modules(modules, allowed_roots=_APPLICATION_ALLOWED_ROOTS)
     assert sorted({module for module in modules if module.startswith("sat_descarga_masiva")}) == [
         "sat_descarga_masiva.application.ports.accounting",
+        "sat_descarga_masiva.application.ports.fiscal_parser",
         "sat_descarga_masiva.application.ports.persistence",
         "sat_descarga_masiva.application.ports.services",
+        "sat_descarga_masiva.application.ports.source",
         "sat_descarga_masiva.contabilidad.classification",
         "sat_descarga_masiva.contabilidad.journal",
         "sat_descarga_masiva.contabilidad.rules.contract",
@@ -387,7 +389,10 @@ def test_a25_the_new_stage_depends_inward_only() -> None:
         "sat_descarga_masiva.domain.model.fiscal_document",
         "sat_descarga_masiva.domain.model.perspective",
         "sat_descarga_masiva.domain.model.review",
+        "sat_descarga_masiva.domain.model.source",
         "sat_descarga_masiva.domain.model.value_objects",
+        "sat_descarga_masiva.domain.policy.money",
+        "sat_descarga_masiva.fiscal.parse",
         "sat_descarga_masiva.fiscal.projection",
     ]
 
@@ -417,3 +422,42 @@ def test_the_reposting_rule_module_reads_the_engine_and_the_domain_only() -> Non
         "sat_descarga_masiva.domain.policy.money",
     ]
     assert "sat_descarga_masiva.contabilidad.rules.posting" not in modules
+
+
+def test_the_credit_note_rule_module_reads_the_engine_and_the_domain_only() -> None:
+    """§4/§8: `credit_notes.py` books §8a:212 and may not reach past its context.
+
+    It is the other half of the family `posting.py` appends, so it may not import the registry
+    that appends it, may not open a repository to learn what the original said — that arrives as
+    `PostingContext.related_documents` — and may not name an account (§8a:207). Its imports are
+    therefore the engine own contract, journal vocabulary, roles and shared arithmetic, plus the
+    domain model it reads.
+    """
+    modules = _imported_modules(
+        _package_sources()["rules/credit_notes.py"], filename="credit_notes.py"
+    )
+    assert not _forbidden_modules(modules)
+    assert not _external_modules(modules)
+    assert sorted(module for module in modules if module.startswith("sat_descarga_masiva")) == [
+        "sat_descarga_masiva.contabilidad.classification",
+        "sat_descarga_masiva.contabilidad.journal",
+        "sat_descarga_masiva.contabilidad.roles",
+        "sat_descarga_masiva.contabilidad.rules.amounts",
+        "sat_descarga_masiva.contabilidad.rules.contract",
+        "sat_descarga_masiva.domain.enums.comprobante",
+        "sat_descarga_masiva.domain.model.perspective",
+        "sat_descarga_masiva.domain.model.review",
+        "sat_descarga_masiva.domain.model.value_objects",
+    ]
+    assert "sat_descarga_masiva.contabilidad.rules.posting" not in modules
+
+
+def test_the_shared_amounts_module_depends_on_neither_rule_family() -> None:
+    """§8: the arithmetic is shared, so it may not depend on the rows that share it."""
+    modules = _imported_modules(_package_sources()["rules/amounts.py"], filename="amounts.py")
+    assert not _forbidden_modules(modules)
+    assert not _external_modules(modules)
+    assert not {
+        "sat_descarga_masiva.contabilidad.rules.posting",
+        "sat_descarga_masiva.contabilidad.rules.credit_notes",
+    } & set(modules)

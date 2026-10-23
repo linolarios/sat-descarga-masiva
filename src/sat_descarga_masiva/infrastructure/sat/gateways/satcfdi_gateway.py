@@ -102,9 +102,13 @@ class SatcfdiGateway:
 
     def verify(self, request_id: RequestId, rfc: Rfc, token: AccessToken) -> VerificationResult:
         response = self._sat.recover_comprobante_status(request_id.value)
+        # CodigoEstadoSolicitud is the event code classify() consumes; CodEstatus
+        # is only the transport status. Prefer the event code and fall back so a
+        # missing/OPEN attribute never crashes the client (the XML parser does the same).
+        code = response.get("CodigoEstadoSolicitud") or response.get("CodEstatus") or "5000"
         return VerificationResult(
             state=_REQUEST_STATE[int(response["EstadoSolicitud"])],
-            cod_estatus=SatStatusCode(response["CodEstatus"]),
+            cod_estatus=SatStatusCode(str(code)),
             numero_cfdis=int(response.get("NumeroCFDIs", 0)),
             mensaje=response.get("Mensaje", ""),
             ids_paquetes=tuple(PackageId(p) for p in response.get("IdsPaquetes", [])),

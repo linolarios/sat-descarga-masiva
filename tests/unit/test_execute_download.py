@@ -14,7 +14,11 @@ from sat_descarga_masiva.domain.enums.catalog import (
 )
 from sat_descarga_masiva.domain.enums.request_state import RequestState
 from sat_descarga_masiva.domain.enums.sat_status import SatStatusCode
-from sat_descarga_masiva.domain.errors import SatTimeoutError, UnexpectedSatResponseError
+from sat_descarga_masiva.domain.errors import (
+    SatRequestFailedError,
+    SatTimeoutError,
+    UnexpectedSatResponseError,
+)
 from sat_descarga_masiva.domain.model.query import DownloadQuery
 from sat_descarga_masiva.domain.model.results import Package, SubmitResult, VerificationResult
 from sat_descarga_masiva.domain.model.token import AccessToken
@@ -154,12 +158,12 @@ def test_workflow_returns_packages() -> None:
     assert outcome.packages[0].package_id == PackageId(f"{RID}_01")
 
 
-def test_terminal_error_returns_no_packages() -> None:
+def test_terminal_error_raises_and_never_downloads() -> None:
+    """M1-H: Error/Rejected/Expired is a terminal failure, not an empty outcome."""
     uc = build_uc(FakeVerifier(RequestState.ERROR), downloader=ExplodingDownloader())
-    outcome = uc.execute(_query())
-    assert outcome.request_id == RequestId(RID)
-    assert outcome.state is RequestState.ERROR
-    assert outcome.packages == ()
+    with pytest.raises(SatRequestFailedError) as excinfo:
+        uc.execute(_query())
+    assert excinfo.value.estado_solicitud == int(RequestState.ERROR)
 
 
 def test_raises_timeout_after_deadline() -> None:

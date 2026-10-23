@@ -12,6 +12,7 @@ interchangeable (§8:161):
   entry at all (no §8 number exists to key one by).
 """
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -20,13 +21,19 @@ import pytest
 from sat_descarga_masiva.contabilidad.classification import Classification
 from sat_descarga_masiva.contabilidad.journal import AccountingAssumption, ProposedJournalEntry
 from sat_descarga_masiva.contabilidad.roles import AccountRole
-from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, ReviewRequest, Skip
+from sat_descarga_masiva.contabilidad.rules.contract import (
+    PostingContext,
+    RelatedDocument,
+    ReviewRequest,
+    Skip,
+)
 from sat_descarga_masiva.contabilidad.rules.posting import (
     POSTING_RULES,
     SUPPORTED_RULES,
     propose,
 )
 from sat_descarga_masiva.domain.model.fiscal_document import (
+    CfdiRelacionados,
     FiscalDocument,
     Impuestos,
     Traslado,
@@ -192,8 +199,6 @@ def test_the_out_of_scope_table_is_the_only_way_to_a_skip(
 @pytest.mark.parametrize(
     "tipo,perspective",
     [
-        ("E", Perspective.EMITIDO),
-        ("E", Perspective.RECIBIDO),
         ("X", Perspective.EMITIDO),
         ("I", Perspective.UNDETERMINED),
         ("P", Perspective.UNDETERMINED),
@@ -243,7 +248,18 @@ def test_the_registry_holds_the_income_rows_for_both_sides() -> None:
     The REP rows are the wildcard ``None``: §8:192 gives a `P` comprobante no header ``MetodoPago``
     to select on, so the registry states that instead of a method the document never carries.
     """
-    assert {row.rule_id for row in POSTING_RULES} == {"4.1", "4.2", "4.3", "4.4", "4.5a", "4.5b"}
+    assert {row.rule_id for row in POSTING_RULES} == {
+        "4.1",
+        "4.2",
+        "4.3",
+        "4.4",
+        "4.5a",
+        "4.5b",
+        "4.6",
+        "4.7",
+        "4.8",
+        "4.9",
+    }
     assert {row.rule_id: row.rule_version for row in POSTING_RULES} == SUPPORTED_RULES
     assert {str(row.metodo_pago) for row in POSTING_RULES} == {"PUE", "PPD", "None"}
 
@@ -258,6 +274,107 @@ def test_the_rows_claim_disjoint_shapes() -> None:
         _context(tipo="T", metodo_pago=None),
         _context(tipo="P", metodo_pago=None),
         _context(perspective=Perspective.RECIBIDO),
+    ]
+    for context in contexts:
+        assert sum(1 for row in POSTING_RULES if row.claims(context)) <= 1
+
+
+# --- §8a:212 credit notes: the family, the relation gates, and the note's method --------
+
+NOTE_UUID = Uuid("5e80345d-917f-40bb-a98f-4a73939353c5")
+ORIGINAL_UUID = Uuid("6e80345d-917f-40bb-a98f-4a73939353c5")
+
+
+def _original(**overrides: object) -> RelatedDocument:
+    """The one original a note reverses, as the seam would have resolved it."""
+    values: dict[str, object] = {
+        "uuid": ORIGINAL_UUID,
+        "tipo_relacion": "01",
+        "metodo_pago": "PUE",
+        "total": _money("116.00"),
+        "posted": True,
+    }
+    values.update(overrides)
+    return RelatedDocument(**values)  # type: ignore[arg-type]
+
+
+def _note(
+    *uuids: Uuid,
+    perspective: Perspective = Perspective.EMITIDO,
+    metodo_pago: str | None = "PUE",
+    related: tuple[RelatedDocument, ...] = (),
+) -> PostingContext:
+    """An `E` comprobante naming ``uuids`` under TipoRelacion 01, and what they resolved to."""
+    document = replace(
+        _document(tipo="E", metodo_pago=metodo_pago),
+        cfdi_relacionados=(CfdiRelacionados("01", uuids),),
+    )
+    return PostingContext(
+        contributor_rfc=CONTRIBUTOR,
+        document=document,
+        perspective=perspective,
+        related_documents=related,
+    )
+
+
+@pytest.mark.parametrize(
+    "uuids,related,flag",
+    [
+        ((), (), ReviewFlagType.EGRESO_RELATION_MISSING),
+        ((ORIGINAL_UUID, NOTE_UUID), (_original(),), ReviewFlagType.EGRESO_MULTIPLE_ORIGINALS),
+        ((ORIGINAL_UUID,), (), ReviewFlagType.EGRESO_ORIGINAL_NOT_FOUND),
+        ((ORIGINAL_UUID,), (_original(metodo_pago=None),), ReviewFlagType.MISSING_SOURCE_FIELD),
+    ],
+)
+def test_a_note_the_family_cannot_claim_names_the_relation_fact_that_is_missing(
+    uuids: tuple[Uuid, ...], related: tuple[RelatedDocument, ...], flag: ReviewFlagType
+) -> None:
+    """§8a:212: four resolvable facts, four flags — and no entry to key any of them by."""
+    proposal = propose(_note(*uuids, related=related))
+    assert not isinstance(proposal, Skip)
+    assert _flag_types(proposal) == [flag]
+    assert _refused(proposal).entry is None
+
+
+@pytest.mark.parametrize(
+    "note_method,original_method,rule_id,flag",
+    [
+        ("PUE", "PUE", "4.6", ReviewFlagType.EGRESO_IVA_EVIDENCE_MISSING),
+        ("PPD", "PUE", "4.6", ReviewFlagType.EGRESO_IVA_EVIDENCE_MISSING),
+        (None, "PPD", "4.7", ReviewFlagType.EGRESO_PAYMENT_HISTORY_UNAVAILABLE),
+        ("PUE", "PPD", "4.7", ReviewFlagType.EGRESO_PAYMENT_HISTORY_UNAVAILABLE),
+    ],
+)
+def test_the_family_is_chosen_by_the_originals_method_and_never_the_notes(
+    note_method: str | None, original_method: str, rule_id: str, flag: ReviewFlagType
+) -> None:
+    """§8a:212: a note is not paid, so its own header MetodoPago cannot select its row."""
+    context = _note(
+        ORIGINAL_UUID,
+        metodo_pago=note_method,
+        related=(_original(metodo_pago=original_method),),
+    )
+    claimed = [row.rule_id for row in POSTING_RULES if row.claims(context)]
+    assert claimed == [rule_id]
+    refusal = _refused(propose(context))
+    assert refusal.entry is not None
+    assert refusal.entry.rule_id == rule_id
+    assert _flag_types(refusal) == [flag]
+
+
+def test_the_credit_note_rows_claim_disjoint_shapes_too() -> None:
+    """Deterministic selection (§8:159): a note is one row's, or none's."""
+    contexts = [
+        _note(ORIGINAL_UUID, related=(_original(metodo_pago="PUE"),)),
+        _note(ORIGINAL_UUID, related=(_original(metodo_pago="PPD"),)),
+        _note(
+            ORIGINAL_UUID,
+            perspective=Perspective.RECIBIDO,
+            related=(_original(metodo_pago="PUE"),),
+        ),
+        _note(ORIGINAL_UUID, related=(_original(metodo_pago=None),)),
+        _note((), related=()),
+        _note(),
     ]
     for context in contexts:
         assert sum(1 for row in POSTING_RULES if row.claims(context)) <= 1

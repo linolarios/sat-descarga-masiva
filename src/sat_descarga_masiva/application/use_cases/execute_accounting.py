@@ -58,14 +58,17 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from sat_descarga_masiva.application.ports.accounting import AccountMapping, MappingProvider
+from sat_descarga_masiva.application.ports.fiscal_parser import FiscalXmlParser
 from sat_descarga_masiva.application.ports.persistence import (
+    DocumentRepository,
     JournalEntryStore,
     MetadataSnapshotStore,
 )
 from sat_descarga_masiva.application.ports.services import Clock
+from sat_descarga_masiva.application.ports.source import ExtractedXmlReader
 from sat_descarga_masiva.contabilidad.classification import Classification
 from sat_descarga_masiva.contabilidad.journal import JournalEntryRecord, LineSide, PostingState
-from sat_descarga_masiva.contabilidad.rules.contract import PostingContext
+from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, RelatedDocument
 from sat_descarga_masiva.contabilidad.rules.posting import propose
 from sat_descarga_masiva.contabilidad.validator import (
     PostingDecision,
@@ -76,7 +79,10 @@ from sat_descarga_masiva.domain.errors import UnbalancedJournalCommit
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument
 from sat_descarga_masiva.domain.model.perspective import Perspective
 from sat_descarga_masiva.domain.model.review import ReviewFlags
+from sat_descarga_masiva.domain.model.source import ExtractedXml
 from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
+from sat_descarga_masiva.domain.policy.money import NormalizedAmount
+from sat_descarga_masiva.fiscal.parse import build_fiscal_document
 from sat_descarga_masiva.fiscal.projection import ProcessedDocument
 
 
@@ -102,7 +108,7 @@ class AccountingResult:
 class ExecuteAccountingUseCase:
     """Turn one projected document into at most one durable posting (§8/§11 M3)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 (each collaborator is a real boundary)
         self,
         *,
         mapping: MappingProvider,
@@ -110,12 +116,16 @@ class ExecuteAccountingUseCase:
         store: JournalEntryStore,
         clock: Clock,
         snapshots: MetadataSnapshotStore | None = None,
+        documents: DocumentRepository | None = None,
+        xml_reader: ExtractedXmlReader | None = None,
+        parser: FiscalXmlParser | None = None,
     ) -> None:
         self._mapping = mapping
         self._validator = validator
         self._store = store
         self._clock = clock
         self._snapshots = snapshots
+        self._sources = _OriginalSources(documents, xml_reader, parser)
 
     def execute(self, processed: ProcessedDocument, *, contributor_rfc: Rfc) -> AccountingResult:
         """Account one projected document for ``contributor_rfc``'s books (§8:169/194).
@@ -128,7 +138,14 @@ class ExecuteAccountingUseCase:
         document = _with_resolved_status(document, contributor_rfc, self._snapshots)
         merged = replace(document, review_flags=_merged_review_flags(processed, document))
         mapping = self._mapping.mapping_for(contributor_rfc)
-        context = _posting_context(processed, merged, contributor_rfc, mapping, self._store)
+        context = _posting_context(
+            processed,
+            merged,
+            contributor_rfc,
+            mapping,
+            self._store,
+            related=_related_documents(document, contributor_rfc, self._store, self._sources),
+        )
         decision = self._validator.decide(context, propose(context), mapping=mapping)
         if decision.entry is None:
             return AccountingResult(decision=decision)
@@ -187,12 +204,13 @@ def _merged_review_flags(processed: ProcessedDocument, document: FiscalDocument)
     return document.review_flags.merged_with(processed.review_flags)
 
 
-def _posting_context(
+def _posting_context(  # noqa: PLR0913, PLR0917 (the context is assembled from these facts)
     processed: ProcessedDocument,
     document: FiscalDocument,
     contributor_rfc: Rfc,
     mapping: AccountMapping,
     store: JournalEntryStore,
+    related: tuple[RelatedDocument, ...],
 ) -> PostingContext:
     """The engine's view of one document: whose books, which document, as whom (§8).
 
@@ -205,7 +223,123 @@ def _posting_context(
         perspective=processed.perspective,
         classification=_classification_for(processed, document, mapping),
         posted_source_uuids=_posted_source_uuids(document, contributor_rfc, store),
+        related_documents=related,
     )
+
+
+@dataclass(frozen=True)
+class _OriginalSources:
+    """The three ports an original is re-read through, each `None` when unwired (§8a:212).
+
+    They travel together because an original can be read only when all three are wired: a caller
+    that supplies two of them has not made the seam work, it has made it fail somewhere nobody
+    would look. Grouping them is also what keeps the assembly to one argument per fact, so the
+    signature of a helper still says what it needs rather than how it happens to get it.
+    """
+
+    documents: DocumentRepository | None = None
+    xml_reader: ExtractedXmlReader | None = None
+    parser: FiscalXmlParser | None = None
+
+
+def _related_documents(
+    document: FiscalDocument,
+    contributor_rfc: Rfc,
+    store: JournalEntryStore,
+    sources: _OriginalSources,
+) -> tuple[RelatedDocument, ...]:
+    """The documentos this comprobante relates to, resolved from the client archive.
+
+    §8a:212 credit notes mirror the roles of the original, so the facts a rule needs from it —
+    its ``MetodoPago``, its header ``Total`` and whether the books ever posted it — are
+    assembled here, once per document, and carried on `PostingContext.related_documents`: a rule
+    reads nothing but its context, so this is the only place an original can be read at all.
+
+    Three properties make the seam safe to add to every document:
+
+    - **nothing is read when nothing is stated.** A comprobante with no `CfdiRelacionados`
+      gets `()` and costs no query, so §8:179–185 behaves exactly as before;
+    - **never raise, never guess.** A missing row, an unwired port or an unreadable artifact is a
+      *document-level* condition, not a wiring error: the original is recorded with
+      `metodo_pago=None`/`total=None` and the rule reviews it, because losing a whole run to
+      one unreadable XML would be worse than one honest review;
+    - **the ledger fact is POSTED-only.** `posted` is true when a `POSTED` record exists for
+      the original: a `PROPOSED` refusal or a `SKIPPED` row moved nothing to reverse.
+    """
+    if not document.cfdi_relacionados:
+        return ()
+    return tuple(
+        _related_document(
+            tipo_relacion,
+            uuid,
+            contributor_rfc,
+            store,
+            sources,
+        )
+        for relacion in document.cfdi_relacionados
+        for uuid in relacion.uuids
+        for tipo_relacion in (relacion.tipo_relacion,)
+    )
+
+
+def _related_document(
+    tipo_relacion: str,
+    uuid: Uuid,
+    contributor_rfc: Rfc,
+    store: JournalEntryStore,
+    sources: _OriginalSources,
+) -> RelatedDocument:
+    """One related document's facts, or the same record with them left unknown.
+
+    ``metodo_pago``/``total`` stay `None` whenever the original cannot be re-read: no repository
+    wired, no row for the UUID, an artifact that fails its own integrity check, a parse that
+    fails, or a projection with no document. Each is a reason for the rule to review (§8a:212),
+    never a reason to crash the stage or to presume what the original said.
+    """
+    posted = any(
+        record.posting_state is PostingState.POSTED
+        for record in store.for_source(contributor_rfc, uuid)
+    )
+    metodo_pago, total, moneda = _original_facts(
+        uuid, sources.documents, sources.xml_reader, sources.parser
+    )
+    return RelatedDocument(
+        uuid=uuid,
+        tipo_relacion=tipo_relacion,
+        metodo_pago=metodo_pago,
+        total=total,
+        posted=posted,
+        moneda=moneda,
+    )
+
+
+def _original_facts(
+    uuid: Uuid,
+    documents: DocumentRepository | None,
+    xml_reader: ExtractedXmlReader | None,
+    parser: FiscalXmlParser | None,
+) -> tuple[str | None, NormalizedAmount | None, str | None]:
+    """The original's MetodoPago, header Total and currency, or three unknowns.
+
+    The bytes are re-read through the same three ports M2.8 uses, so the facts come from the
+    stored artifact and not from the related document's header: `CfdiRelacionados` states a
+    UUID, never what the original said. `build_fiscal_document` is the one translation M2 has,
+    so a Total this stage hands on is normalized exactly as the posting rules see one.
+    """
+    if documents is None or xml_reader is None or parser is None:
+        return None, None, None
+    try:
+        record = documents.get(uuid)
+        if record is None:
+            return None, None, None
+        artifact = ExtractedXml(record.uuid.value, record.tipo, record.source_hash)
+        raw = parser.parse(xml_reader.read(artifact), record.source_hash)
+        original = build_fiscal_document(raw, record.source_hash).document
+    except Exception:  # noqa: BLE001 (a per-document read must never abort the stage)
+        return None, None, None
+    if original is None:
+        return None, None, None
+    return original.metodo_pago, original.total, original.moneda
 
 
 def _posted_source_uuids(
@@ -248,17 +382,18 @@ def _posted_source_uuids(
 def _classification_for(
     processed: ProcessedDocument, document: FiscalDocument, mapping: AccountMapping
 ) -> Classification | None:
-    """§8a:207's classification answer — only for a received ``I`` comprobante, else ``None``.
+    """§8a:207's answer — for a received comprobante that books a base, else `None`.
 
-    §8's rows 4.3/4.4 are the only ones whose base role is not fixed by the row itself, so they
-    are the only ones that need the client's ``ClaveProdServ → AccountingCategory`` table. An
-    emitted document's base role comes from §8:179/180, and a non-``I`` comprobante is either a
-    skip or an unbuilt row; classifying either would ask a question this engine does not have to
-    answer, and could turn an unrelated product into a review reason.
+    §8's rows 4.3/4.4 and §8a:212's 4.8/4.9 are the only rows whose base role the row
+    itself does not fix, so they are the only ones that need the client's `ClaveProdServ →
+    AccountingCategory` table. An emitted document's base role comes from §8:179/180, and a
+    note over a PUE original simply reverses it; every other comprobante is a skip or an unbuilt
+    row, and classifying one would ask a question this engine does not have to answer — and could
+    turn an unrelated product into a review reason.
     """
     if processed.perspective is not Perspective.RECIBIDO:
         return None
-    if TipoComprobante.of(document.tipo) is not TipoComprobante.INGRESO:
+    if TipoComprobante.of(document.tipo) not in (TipoComprobante.INGRESO, TipoComprobante.EGRESO):
         return None
     return mapping.classify(document)
 

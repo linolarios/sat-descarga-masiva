@@ -40,6 +40,43 @@ from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument
 from sat_descarga_masiva.domain.model.perspective import Perspective
 from sat_descarga_masiva.domain.model.review import ReviewFlag, ReviewFlagType
 from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
+from sat_descarga_masiva.domain.policy.money import NormalizedAmount
+
+
+@dataclass(frozen=True)
+class RelatedDocument:
+    """One document the comprobante under audit states it relates to (§8a:212).
+
+    A credit note is a *commercial correction* of something that already exists, and the CFDI
+    states which: `CfdiRelacionados` with `TipoRelacion` 01 carries the UUIDs of the
+    documentos it cancels. §8a:212 books the correction against the roles the original used, so a
+    rule must read the original's facts — and a rule may read nothing but its context. They
+    therefore arrive here, resolved before the rule runs, exactly as `classification` and
+    `posted_source_uuids` do:
+
+    - `tipo_relacion` stays the bare source code: 01 is the note this engine books, and any
+      other code is a fact a rule must not read as "relates to a credit note";
+    - `metodo_pago` is the **original's** `MetodoPago`, never the note's: the credit-note rows
+      are selected by how the original was to be paid (PUE/PPD), because that is which receivable
+      or payable the note reverses. `None` means the original could not be read — an epistemic
+      limit, never a guess;
+    - `total` is the original's header `Total`, the only cap a credit note may be held to;
+    - `posted` is a ledger fact: at least one `POSTED` entry exists for the original, so the
+      receivable or payable the note reverses was ever recorded. A `PROPOSED` refusal or a
+      `SKIPPED` row moved nothing and does not count.
+
+    `moneda` is the original's currency, carried because a note may only be netted against an
+    original the engine values the same way (§8:193). Every field but `moneda` is a fact the
+    rule names; `moneda` is what a later partial-credit allocation will need, and it is `None`
+    exactly when the original could not be read.
+    """
+
+    uuid: Uuid
+    tipo_relacion: str
+    metodo_pago: str | None
+    total: NormalizedAmount | None
+    posted: bool
+    moneda: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +103,14 @@ class PostingContext:
     has the money land on the configured unapplied-payment account with the gap flagged. Like
     ``classification`` this is resolved from the client's own books *before* the rule runs, so
     the rule stays the pure function of its context that makes it replayable.
+
+    ``related_documents`` is the seam the credit-note rows need and a rule cannot read for
+    itself: the facts of the documentos the comprobante states it relates to (``CfdiRelacionados``),
+    read from the client's own archive and ledger *before* the rule runs. A note selects its row
+    by the **original's** ``MetodoPago``, so that fact has to be resolved outside the rule — a rule
+    reads nothing but its context, and it may not open a repository to learn what it reverses.
+    The tuple is empty for every document that states no relation (§8:179–185), so nothing is
+    queried for one that states none.
     """
 
     contributor_rfc: Rfc
@@ -73,6 +118,7 @@ class PostingContext:
     perspective: Perspective
     classification: Classification | None = None
     posted_source_uuids: frozenset[Uuid] = frozenset()
+    related_documents: tuple[RelatedDocument, ...] = ()
 
 
 @dataclass(frozen=True)

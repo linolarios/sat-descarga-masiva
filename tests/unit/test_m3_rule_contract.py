@@ -115,7 +115,10 @@ def test_the_context_is_exactly_the_books_the_document_the_perspective_and_class
     receiving rules still read nothing but their context. ``posted_source_uuids`` is the other,
     and the reason it is a field rather than a lookup: §8:192's REP rows must know which related
     documents the ledger already holds as POSTED, and a rule that could read persistence for
-    itself would stop being a pure function of its context.
+    itself would stop being a pure function of its context. ``related_documents`` follows the
+    same rule for §8a:212: a credit note is selected by its **original's** ``MetodoPago``, which
+    the note does not carry, so the original's resolved facts arrive here rather than through a
+    repository read inside the rule.
     """
     assert [field.name for field in fields(PostingContext)] == [
         "contributor_rfc",
@@ -123,6 +126,7 @@ def test_the_context_is_exactly_the_books_the_document_the_perspective_and_class
         "perspective",
         "classification",
         "posted_source_uuids",
+        "related_documents",
     ]
 
 

@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tratamiento contable de CFDI tipo E (Egreso / Notas de crédito)</title>
+    <style>
+        body { font-family: Arial, Helvetica, sans-serif; max-width: 1000px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #222; }
+        h1 { font-size: 1.8em; border-bottom: 3px solid #333; padding-bottom: 10px; }
+        h2 { font-size: 1.35em; margin-top: 35px; border-bottom: 1px solid #ccc; padding-bottom: 5px; color: #1a3e6f; }
+        h3 { font-size: 1.1em; margin-top: 25px; color: #333; }
+        pre { background: #f4f4f4; border-left: 4px solid #1a3e6f; padding: 12px 16px; overflow-x: auto; font-family: Consolas, "Courier New", monospace; font-size: 0.95em; }
+        code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-family: Consolas, "Courier New", monospace; }
+        table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 0.95em; }
+        th, td { border: 1px solid #aaa; padding: 8px 10px; vertical-align: top; text-align: left; }
+        th { background: #e8eef7; font-weight: bold; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        .nota { background: #fff8e1; border-left: 5px solid #f0ad4e; padding: 12px 16px; margin: 20px 0; }
+        .conclusion { background: #e8f5e9; border-left: 5px solid #2e7d32; padding: 12px 16px; margin: 20px 0; }
+        .diagrama { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; margin: 25px 0; text-align: center; }
+        .diagrama svg { max-width: 100%; height: auto; }
+        .referencias { font-size: 0.9em; }
+        .referencias li { margin-bottom: 8px; }
+        @media print {
+            body { max-width: none; margin: 0; padding: 15px; font-size: 11pt; }
+            h1 { font-size: 1.5em; }
+            h2 { font-size: 1.2em; page-break-after: avoid; }
+            pre, table, .diagrama { page-break-inside: avoid; }
+            .nota, .conclusion { page-break-inside: avoid; }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Tratamiento contable de CFDI tipo E (Egreso / Notas de crédito)</h1>
+
+    <p>Para automatizar la contabilización de CFDI tipo E (Egreso / Notas de crédito) sin asumir tratamientos incorrectos, lo más seguro es diseñar reglas conservadoras que prioricen la revisión manual ante cualquier ambigüedad. A continuación, se presenta el criterio contable para cada uno de los 16 puntos, basado en la normativa fiscal y contable mexicana.</p>
+
+    <!-- ============ DIAGRAMA DE FLUJO ============ -->
+    <h2>Diagrama de flujo de decisión para automatización</h2>
+
+    <div class="diagrama">
+        <svg viewBox="0 0 900 1180" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif" font-size="12">
+            <defs>
+                <marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+                    <polygon points="0 0, 10 3.5, 0 7" fill="#333"/>
+                </marker>
+                <style>
+                    .box { fill: #e8eef7; stroke: #1a3e6f; stroke-width: 1.5; rx: 6; ry: 6; }
+                    .box-warn { fill: #fff3cd; stroke: #e0a800; stroke-width: 1.5; rx: 6; ry: 6; }
+                    .box-ok { fill: #d4edda; stroke: #28a745; stroke-width: 1.5; rx: 6; ry: 6; }
+                    .box-no { fill: #f8d7da; stroke: #dc3545; stroke-width: 1.5; rx: 6; ry: 6; }
+                    .diamond { fill: #fff; stroke: #1a3e6f; stroke-width: 1.5; }
+                    .txt { text-anchor: middle; dominant-baseline: middle; fill: #222; }
+                    .txt-bold { text-anchor: middle; dominant-baseline: middle; fill: #222; font-weight: bold; }
+                    .line { stroke: #333; stroke-width: 1.2; fill: none; marker-end: url(#arrow); }
+                    .line-no { stroke: #dc3545; stroke-width: 1.2; fill: none; marker-end: url(#arrow); }
+                    .line-ok { stroke: #28a745; stroke-width: 1.2; fill: none; marker-end: url(#arrow); }
+                </style>
+            </defs>
+
+            <!-- INICIO -->
+            <rect class="box-ok" x="320" y="10" width="260" height="40"/>
+            <text class="txt-bold" x="450" y="30">CFDI tipo E recibido</text>
+            <line class="line" x1="450" y1="50" x2="450" y2="90"/>
+
+            <!-- P1: ¿UUID relacionado? -->
+            <polygon class="diamond" points="450,90 590,135 450,180 310,135"/>
+            <text class="txt" x="450" y="135">¿Existe UUID del CFDI original</text>
+            <text class="txt" x="450" y="150">en CfdiRelacionados?</text>
+
+            <line class="line-no" x1="310" y1="135" x2="100" y2="135"/>
+            <line class="line-no" x1="100" y1="135" x2="100" y2="300"/>
+            <rect class="box-no" x="20" y="300" width="160" height="50"/>
+            <text class="txt" x="100" y="318">REVISIÓN</text>
+            <text class="txt" x="100" y="336">MANUAL</text>
+
+            <line class="line-ok" x1="590" y1="135" x2="750" y2="135"/>
+            <line class="line-ok" x1="750" y1="135" x2="750" y2="90"/>
+
+            <!-- P2: ¿Original contabilizado? -->
+            <line class="line" x1="450" y1="180" x2="450" y2="220"/>
+            <polygon class="diamond" points="450,220 590,265 450,310 310,265"/>
+            <text class="txt" x="450" y="265">¿Factura original</text>
+            <text class="txt" x="450" y="280">está contabilizada?</text>
+
+            <line class="line-no" x1="310" y1="265" x2="100" y2="265"/>
+            <line class="line-no" x1="100" y1="265" x2="100" y2="300"/>
+
+            <line class="line" x1="450" y1="310" x2="450" y2="350"/>
+
+            <!-- P3: ¿Múltiples facturas? -->
+            <polygon class="diamond" points="450,350 590,395 450,440 310,395"/>
+            <text class="txt" x="450" y="395">¿Tiene varios UUID</text>
+            <text class="txt" x="450" y="410">relacionados?</text>
+
+            <line class="line-no" x1="310" y1="395" x2="100" y2="395"/>
+            <line class="line-no" x1="100" y1="395" x2="100" y2="300"/>
+
+            <line class="line" x1="450" y1="440" x2="450" y2="480"/>
+
+            <!-- P4: ¿PUE o PPD? -->
+            <polygon class="diamond" points="450,480 590,525 450,570 310,525"/>
+            <text class="txt-bold" x="450" y="518">¿Método de pago</text>
+            <text class="txt-bold" x="450" y="535">de la factura ORIGINAL?</text>
+
+            <!-- PPD -->
+            <line class="line" x1="310" y1="525" x2="150" y2="525"/>
+            <line class="line" x1="150" y1="525" x2="150" y2="590"/>
+
+            <!-- P5-PPD: ¿Pagos parciales? -->
+            <polygon class="diamond" points="150,590 290,635 150,680 10,635"/>
+            <text class="txt" x="150" y="628">¿Tiene pagos</text>
+            <text class="txt" x="150" y="643">parciales o REP?</text>
+
+            <line class="line-no" x1="290" y1="635" x2="400" y2="635"/>
+            <line class="line-no" x1="400" y1="635" x2="400" y2="700"/>
+            <rect class="box-ok" x="300" y="700" width="200" height="50"/>
+            <text class="txt-bold" x="400" y="718">AUTOMATIZAR</text>
+            <text class="txt" x="400" y="736">PPD sin pagos</text>
+
+            <line class="line-no" x1="150" y1="680" x2="150" y2="730"/>
+            <rect class="box-no" x="20" y="730" width="260" height="50"/>
+            <text class="txt" x="150" y="748">REVISIÓN MANUAL</text>
+            <text class="txt" x="150" y="766">Pagos parciales / REP</text>
+
+            <!-- PUE -->
+            <line class="line" x1="590" y1="525" x2="750" y2="525"/>
+            <line class="line" x1="750" y1="525" x2="750" y2="590"/>
+
+            <!-- P5-PUE: ¿Evidencia devolución? -->
+            <polygon class="diamond" points="750,590 890,635 750,680 610,635"/>
+            <text class="txt" x="750" y="628">¿Hay evidencia</text>
+            <text class="txt" x="750" y="643">de devolución?</text>
+
+            <line class="line-ok" x1="890" y1="635" x2="1000" y2="635"/>
+            <line class="line-ok" x1="1000" y1="635" x2="1000" y2="700"/>
+            <rect class="box-ok" x="900" y="700" width="180" height="50"/>
+            <text class="txt-bold" x="990" y="718">AUTOMATIZAR</text>
+            <text class="txt" x="990" y="736">con evidencia</text>
+
+            <line class="line-no" x1="750" y1="680" x2="750" y2="730"/>
+            <rect class="box-warn" x="610" y="730" width="280" height="50"/>
+            <text class="txt" x="750" y="748">REGISTRAR SIN REVERTIR IVA</text>
+            <text class="txt" x="750" y="766">hasta tener evidencia</text>
+
+            <!-- LEYENDA -->
+            <rect x="20" y="840" width="860" height="320" fill="#fff" stroke="#ccc" rx="8"/>
+            <text class="txt-bold" x="450" y="870" font-size="14">Leyenda</text>
+            <rect class="box-ok" x="40" y="890" width="140" height="30"/>
+            <text class="txt" x="110" y="905" font-size="11">Automatizable</text>
+            <rect class="box-warn" x="200" y="890" width="200" height="30"/>
+            <text class="txt" x="300" y="905" font-size="11">Condicional</text>
+            <rect class="box-no" x="420" y="890" width="180" height="30"/>
+            <text class="txt" x="510" y="905" font-size="11">Revisión manual</text>
+
+            <text class="txt-bold" x="450" y="950" font-size="13" fill="#333">Reglas adicionales de revisión manual</text>
+
+            <text x="50" y="980" font-size="11" fill="#555">• Múltiples facturas relacionadas → revisión manual</text>
+            <text x="50" y="1000" font-size="11" fill="#555">• Factura original no contabilizada → revisión manual</text>
+            <text x="50" y="1020" font-size="11" fill="#555">• Falta de UUID en CfdiRelacionados → revisión manual</text>
+            <text x="50" y="1040" font-size="11" fill="#555">• Moneda extranjera → revisión manual</text>
+            <text x="50" y="1060" font-size="11" fill="#555">• Retenciones variables o mixtas → revisión manual</text>
+            <text x="50" y="1080" font-size="11" fill="#555">• IEPS no desglosado explícitamente → revisión manual</text>
+            <text x="50" y="1100" font-size="11" fill="#555">• PUE sin evidencia de reembolso → registrar sin revertir IVA</text>
+            <text x="50" y="1120" font-size="11" fill="#555">• Nota de crédito excede saldo pendiente → revisión manual</text>
+        </svg>
+    </div>
+
+    <!-- ============ 1. CFDI DE EGRESO EMITIDO — PUE ============ -->
+    <h2>1. CFDI de Egreso EMITIDO — PUE</h2>
+
+    <p><strong>Asiento conceptual:</strong></p>
+    <pre>
+Cargo:  Ingresos (por la venta original)
+Cargo:  IVA trasladado cobrado (si ya se había cobrado)
+Abono:  Bancos / Clientes (por la devolución del efectivo o la reducción de saldo)
+    </pre>
+
+    <p><strong>Sobre el IVA:</strong> El CFDI de Egreso por sí solo <strong>no</strong> es evidencia suficiente para revertir el IVA trasladado cobrado. El IVA trasladado se causa cuando se cobra efectivamente la contraprestación (Art. 1-B LIVA), y solo es acreditable cuando ha sido efectivamente pagado (Art. 5, fracción III LIVA)[reference:0][reference:1]. Si la venta original fue PUE y ya se cobró, el IVA ya se enteró al fisco. Para revertirlo, se necesita <strong>evidencia de que el dinero realmente se devolvió al cliente</strong> (transferencia bancaria, estado de cuenta, cheque, etc.), ya que de lo contrario se estaría disminuyendo un impuesto que ya se causó y enteró.</p>
+
+    <p><strong>Respuesta: B) Se requiere comprobar también la devolución/reembolso del dinero.</strong> La evidencia puede ser: transferencia bancaria, estado de cuenta donde se refleje la salida, comprobante de pago, o nota de crédito bancaria. Si el reembolso no se ha materializado, solo debe registrarse la reducción de la cuenta por cobrar (si aún hay saldo) o dejar el saldo a favor del cliente, sin revertir el IVA cobrado.</p>
+
+    <!-- ============ 2. CFDI DE EGRESO EMITIDO — PPD ============ -->
+    <h2>2. CFDI de Egreso EMITIDO — PPD</h2>
+
+    <p><strong>Asiento conceptual:</strong></p>
+    <pre>
+Cargo:  Ingresos
+Cargo:  IVA trasladado no cobrado (si la venta original fue PPD y aún no se cobra)
+Abono:  Clientes (por el saldo pendiente de la factura original)
+    </pre>
+
+    <p><strong>Casos en los que NO se debe disminuir directamente Clientes:</strong></p>
+    <ul>
+        <li><strong>Factura ya pagada parcialmente:</strong> Si ya existen pagos, el saldo de Clientes es menor. La nota de crédito debe aplicarse primero contra el saldo pendiente, y si excede, genera un saldo a favor del cliente (o se revierte IVA ya cobrado).</li>
+        <li><strong>Ya existe un REP (Recibo Electrónico de Pago):</strong> Si ya se emitió un REP por un pago parcial, el IVA de ese pago ya se causó. La nota de crédito debe reversar primero el IVA no cobrado (saldo pendiente) y, si la nota es mayor, reversar proporcionalmente el IVA ya cobrado.</li>
+        <li><strong>Saldo pendiente menor que la nota de crédito:</strong> La diferencia se convierte en saldo a favor del cliente, y debe analizarse si se devuelve efectivo o se aplica a futuras compras.</li>
+        <li><strong>Nota de crédito parcial:</strong> Si solo afecta algunos conceptos, debe identificarse exactamente qué conceptos se están disminuyendo para aplicar la proporción correcta de IVA.</li>
+    </ul>
+
+    <p><strong>En todos estos casos, si la nota de crédito modifica una factura con pagos parciales o REP, es recomendable enviar a revisión manual</strong> para determinar la proporción exacta de IVA cobrado vs. no cobrado a reversar.</p>
+
+    <!-- ============ 3. CFDI DE EGRESO RECIBIDO — PUE ============ -->
+    <h2>3. CFDI de Egreso RECIBIDO — PUE</h2>
+
+    <p><strong>Asiento conceptual:</strong></p>
+    <pre>
+Cargo:  Bancos / Proveedores (por la devolución recibida o reducción de saldo)
+Abono:  Gasto / Inventario / Activo fijo
+Abono:  IVA acreditable pagado
+    </pre>
+
+    <p><strong>Sobre el IVA:</strong> La nota de crédito recibida <strong>no</strong> es suficiente por sí sola para disminuir el IVA acreditable pagado. El IVA acreditable solo procede cuando el impuesto ha sido efectivamente pagado (Art. 5 LIVA)[reference:2]. Si la compra original fue PUE y ya se pagó, el IVA ya se acreditó. Para disminuirlo, se necesita <strong>evidencia de que el proveedor realmente devolvió el dinero</strong> (transferencia, estado de cuenta, etc.).</p>
+
+    <p><strong>Respuesta: B) Se necesita evidencia del reembolso.</strong> Si el proveedor emite la nota de crédito pero no devuelve el efectivo (por ejemplo, la aplica a futuras compras), el IVA acreditable no debe disminuirse hasta que el reembolso sea efectivo.</p>
+
+    <!-- ============ 4. CFDI DE EGRESO RECIBIDO — PPD ============ -->
+    <h2>4. CFDI de Egreso RECIBIDO — PPD</h2>
+
+    <p><strong>Asiento conceptual:</strong></p>
+    <pre>
+Cargo:  Proveedores
+Abono:  Gasto / Inventario / Activo fijo
+Abono:  IVA acreditable pendiente (si la compra original fue PPD y aún no se paga)
+    </pre>
+
+    <p><strong>¿Cambia si la factura original ya tuvo pagos parciales o REP?</strong><br>
+    Sí, cambia. Si ya se realizaron pagos parciales, el IVA de esos pagos ya se acreditó. La nota de crédito debe reversar primero el IVA pendiente de pago (no acreditado) y, si la nota es mayor, reversar proporcionalmente el IVA ya acreditado. Esto requiere revisión manual para determinar la proporción exacta.</p>
+
+    <!-- ============ 5. ¿ES OBLIGATORIO IDENTIFICAR EL CFDI ORIGINAL? ============ -->
+    <h2>5. ¿Es obligatorio identificar el CFDI original?</h2>
+
+    <p>Sí, para un tratamiento automático confiable es indispensable que el CFDI de Egreso contenga el nodo <code>CfdiRelacionados</code> con el UUID de la factura original, y que ese UUID exista en el sistema. El SAT define el tipo de relación <strong>01 – Nota de crédito de los documentos relacionados</strong> para este propósito[reference:3].</p>
+
+    <p><strong>Tratamiento según el caso:</strong></p>
+    <table>
+        <thead>
+            <tr>
+                <th>Caso</th>
+                <th>Tratamiento</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>1. Sí existe relación y encontramos el CFDI original</td>
+                <td>Automatizar (con validaciones adicionales de PUE/PPD, pagos, etc.)</td>
+            </tr>
+            <tr>
+                <td>2. Existe relación pero no tenemos el CFDI original en el sistema</td>
+                <td><strong>Revisión manual obligatoria.</strong> No se puede reversar contablemente algo que no está registrado.</td>
+            </tr>
+            <tr>
+                <td>3. No existe <code>CfdiRelacionados</code></td>
+                <td><strong>Revisión manual obligatoria.</strong> Sin UUID no se puede identificar la operación original.</td>
+            </tr>
+            <tr>
+                <td>4. Existen varios CFDI relacionados</td>
+                <td><strong>Revisión manual obligatoria</strong> para determinar cómo se distribuye el importe entre las facturas originales.</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <!-- ============ 6. ¿LA FACTURA ORIGINAL DEBE HABER SIDO CONTABILIZADA? ============ -->
+    <h2>6. ¿La factura original debe haber sido contabilizada previamente?</h2>
+
+    <p><strong>Sí, es requisito indispensable.</strong> No se puede reversar un asiento que no existe.</p>
+
+    <p><strong>Regla recomendada:</strong></p>
+    <ul>
+        <li>Factura original contabilizada → se permite reversión automática (con validaciones).</li>
+        <li>Factura original no contabilizada → <strong>revisión manual.</strong></li>
+    </ul>
+
+    <!-- ============ 7. NOTA DE CRÉDITO PARCIAL ============ -->
+    <h2>7. Nota de crédito parcial</h2>
+
+    <p><strong>Sí, deben utilizarse directamente los importes de la nota de crédito:</strong></p>
+    <ul>
+        <li>Base = 200</li>
+        <li>IVA = 32</li>
+    </ul>
+
+    <p><strong>No se debe recalcular proporcionalmente la factura original.</strong> La nota de crédito es un documento autónomo que ya contiene los importes correctos del ajuste. Sin embargo, se debe validar que:</p>
+    <ul>
+        <li>El UUID de la factura original exista.</li>
+        <li>La suma de las notas de crédito no exceda el total de la factura original.</li>
+        <li>El tipo de IVA de la nota coincida con el de los conceptos que se están disminuyendo.</li>
+    </ul>
+
+    <!-- ============ 8. NOTA DE CRÉDITO RELACIONADA CON VARIAS FACTURAS ============ -->
+    <h2>8. Nota de crédito relacionada con varias facturas</h2>
+
+    <p>El CFDI de Egreso <strong>no contiene información explícita</strong> sobre cómo distribuir el importe entre cada factura relacionada. Solo incluye la lista de UUIDs, pero no el desglose por factura.</p>
+
+    <p><strong>Si no existe una distribución explícita, debe enviarse a revisión manual.</strong> Repartir automáticamente sería una suposición que podría generar contabilidades incorrectas. La única excepción sería si la nota de crédito incluye conceptos que permitan identificar a qué factura corresponde cada partida (por ejemplo, mediante descripciones o claves de producto específicas), pero esto es poco común y siempre requeriría validación.</p>
+
+    <!-- ============ 9. PUE ORIGINAL VS PPD ORIGINAL ============ -->
+    <h2>9. PUE original vs PPD original</h2>
+
+    <p><strong>La decisión del tratamiento contable debe basarse en el Método de Pago de la factura original, no en el de la nota de crédito.</strong></p>
+    <ul>
+        <li><strong>Factura original = PPD</strong> → El IVA se causa al cobro. Si la nota de crédito se emite antes de cobrar, se reversa IVA no cobrado. Si ya hubo cobros, se reversa primero el IVA no cobrado y luego el cobrado.</li>
+        <li><strong>Factura original = PUE</strong> → El IVA ya se causó y cobró. La nota de crédito solo puede reversar IVA si hay evidencia de devolución de efectivo.</li>
+    </ul>
+
+    <p><strong>Ejemplo: Factura original = PPD, Nota de crédito = PUE.</strong><br>
+    Este caso es <strong>incongruente fiscalmente</strong> (el SAT espera que las notas de crédito se emitan con PUE, pero la factura original fue PPD). <strong>Debe enviarse a revisión manual</strong> para determinar el tratamiento correcto del IVA (cobrado vs. no cobrado) y verificar si ya existen REPs.</p>
+
+    <!-- ============ 10. FACTURA PARCIALMENTE PAGADA ============ -->
+    <h2>10. Factura parcialmente pagada</h2>
+
+    <p><strong>Ejemplo:</strong></p>
+    <ul>
+        <li>Factura PPD: 10,000</li>
+        <li>Pagado: 6,000</li>
+        <li>Saldo: 4,000</li>
+        <li>Nota de crédito: 2,000</li>
+    </ul>
+
+    <p><strong>Tratamiento:</strong><br>
+    La nota de crédito debe aplicarse primero contra el <strong>saldo pendiente</strong> (4,000). Como la nota (2,000) es menor que el saldo, <strong>no hay devolución de efectivo</strong>; simplemente se reduce la cuenta por cobrar.</p>
+
+    <pre>
+Cargo:  Ingresos (2,000)
+Cargo:  IVA trasladado no cobrado (320)
+Abono:  Clientes (2,320)
+    </pre>
+
+    <p><strong>No se revierte IVA cobrado</strong> porque el pago parcial de 6,000 aún no se ve afectado por la nota. El IVA de los 6,000 ya pagados permanece causado.</p>
+
+    <p><strong>Si la nota de crédito excediera el saldo pendiente</strong> (ej. nota de 5,000 sobre saldo de 4,000), la diferencia (1,000 + IVA) correspondería a un importe ya pagado, y requeriría reversar IVA cobrado, lo cual <strong>exige evidencia de devolución de efectivo</strong> y <strong>revisión manual</strong>.</p>
+
+    <!-- ============ 11. IVA CUANDO EXISTEN PAGOS PARCIALES ============ -->
+    <h2>11. IVA cuando existen pagos parciales</h2>
+
+    <p><strong>Sí, una nota de crédito puede requerir reversar una combinación de:</strong></p>
+    <ul>
+        <li>IVA trasladado cobrado + IVA trasladado no cobrado (en ventas)</li>
+        <li>IVA acreditable pagado + IVA acreditable pendiente (en compras)</li>
+    </ul>
+
+    <p><strong>La proporción se determina así:</strong></p>
+    <ol>
+        <li>Se identifica el saldo pendiente de cobro/pago a la fecha de la nota de crédito.</li>
+        <li>La nota de crédito se aplica primero contra el saldo pendiente (IVA no cobrado/no acreditado).</li>
+        <li>Si la nota excede el saldo pendiente, la diferencia se aplica contra los importes ya cobrados/pagados (IVA cobrado/acreditado).</li>
+        <li>Si hay múltiples pagos parciales con diferentes fechas, puede ser necesario prorratear.</li>
+    </ol>
+
+    <p><strong>Este cálculo es complejo y propenso a errores, por lo que se recomienda enviar a revisión manual siempre que existan pagos parciales o REPs.</strong></p>
+
+    <!-- ============ 12. RETENCIONES ============ -->
+    <h2>12. Retenciones</h2>
+
+    <p><strong>Sí, las retenciones deben reversarse.</strong> La nota de crédito debe incluir los mismos impuestos retenidos que la operación original, calculados sobre el monto del ajuste.</p>
+
+    <p><strong>Reglas:</strong></p>
+    <ul>
+        <li><strong>Si somos emisores (venta):</strong> Reversamos la retención de ISR y/o IVA que nos hubieran retenido. Ejemplo: si la factura original tenía retención de ISR 10%, la nota de crédito debe reversar el 10% sobre la base ajustada.</li>
+        <li><strong>Si somos receptores (compra):</strong> Reversamos la retención que nosotros hubiéramos efectuado. Ejemplo: si retuvimos ISR al proveedor, la nota de crédito debe disminuir el pasivo por retención.</li>
+    </ul>
+
+    <p><strong>La reversión debe ser exactamente proporcional al ajuste.</strong> Si la nota de crédito es parcial, se reversa la retención proporcional a la base disminuida.</p>
+
+    <p><strong>¿Automatizable?</strong> Las retenciones estándar (ISR 10%, IVA 2/3 partes) pueden automatizarse si la nota de crédito incluye explícitamente los importes de retención. Sin embargo, si hay retenciones variables o conceptos mixtos, <strong>se recomienda revisión manual.</strong></p>
+
+    <!-- ============ 13. IEPS ============ -->
+    <h2>13. IEPS</h2>
+
+    <p><strong>Sí, el IEPS se revierte de manera similar al IVA.</strong> La Ley del IEPS establece que cuando se reciben devoluciones o se otorgan descuentos, se debe restituir el impuesto trasladado y expedir nota de crédito[reference:4].</p>
+
+    <p><strong>Diferencias:</strong></p>
+    <ul>
+        <li><strong>IEPS trasladado (ventas):</strong> Se revierte contra el IEPS trasladado cobrado (si ya se cobró) o no cobrado (si está pendiente).</li>
+        <li><strong>IEPS acreditable (compras):</strong> Se revierte contra el IEPS acreditable pagado (si ya se pagó) o pendiente.</li>
+    </ul>
+
+    <p><strong>Información necesaria para determinarlo:</strong></p>
+    <ul>
+        <li>Si el producto está gravado por IEPS.</li>
+        <li>La tasa o cuota aplicable.</li>
+        <li>Si el IEPS fue efectivamente trasladado y cobrado/pagado.</li>
+    </ul>
+
+    <p><strong>Si la nota de crédito no desglosa el IEPS explícitamente, debe enviarse a revisión manual.</strong> La automatización solo es segura si el CFDI de Egreso incluye los nodos de IEPS con los importes correctos.</p>
+
+    <!-- ============ 14. MONEDA EXTRANJERA ============ -->
+    <h2>14. Moneda extranjera</h2>
+
+    <p><strong>Tipo de cambio a utilizar:</strong> Se debe utilizar el <strong>tipo de cambio del CFDI de Egreso</strong> (fecha de emisión de la nota de crédito) para registrar la operación en moneda nacional. Esto es consistente con la NIF B-15, que establece que las transacciones en moneda extranjera se registran al tipo de cambio histórico en el momento de la operación[reference:5].</p>
+
+    <p><strong>Diferencia cambiaria:</strong> Sí, debe reconocerse una diferencia cambiaria si el valor en MXN de la nota de crédito (al tipo de cambio de la fecha de la nota) no coincide con el valor original registrado (al tipo de cambio de la fecha de la factura original). Esa diferencia se registra como ganancia o pérdida cambiaria.</p>
+
+    <p><strong>¿Requiere revisión manual?</strong> <strong>Sí, se recomienda revisión manual</strong> para validar el tipo de cambio utilizado, calcular la diferencia cambiaria y confirmar que no haya errores en el registro original.</p>
+
+    <!-- ============ 15. CANCELACIÓN VS NOTA DE CRÉDITO ============ -->
+    <h2>15. Cancelación vs nota de crédito</h2>
+
+    <p><strong>Sí, es correcto tratarlos como eventos contables distintos:</strong></p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Evento</th>
+                <th>Tratamiento contable</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>Cancelación del CFDI original</strong></td>
+                <td>Reversión total del asiento original. El comprobante desaparece del registro contable.</td>
+            </tr>
+            <tr>
+                <td><strong>CFDI de Egreso (nota de crédito)</strong></td>
+                <td>Registro de una operación de disminución/devolución. <strong>No borra ni cancela automáticamente el asiento original.</strong> Ambos documentos quedan vinculados fiscalmente.</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <p>La cancelación procede cuando la factura no debe surtir efectos fiscales (ej. error en el RFC). La nota de crédito se usa cuando la transacción sí existió pero su importe necesita modificarse posteriormente[reference:6].</p>
+
+    <!-- ============ 16. RESUMEN PARA AUTOMATIZAR ============ -->
+    <h2>16. Resumen para automatizar</h2>
+
+    <p><strong>Tabla de asientos conceptuales:</strong></p>
+    <table>
+        <thead>
+            <tr>
+                <th>Caso</th>
+                <th>Debe</th>
+                <th>Haber</th>
+                <th>¿Requiere evidencia de devolución?</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>4.6 — Egreso EMITIDO PUE</strong></td>
+                <td>Ingresos + IVA trasladado cobrado</td>
+                <td>Bancos / Clientes</td>
+                <td><strong>Sí</strong> (si se revierte IVA cobrado)</td>
+            </tr>
+            <tr>
+                <td><strong>4.7 — Egreso EMITIDO PPD</strong></td>
+                <td>Ingresos + IVA trasladado no cobrado</td>
+                <td>Clientes</td>
+                <td><strong>No</strong> (si solo reduce saldo pendiente)</td>
+            </tr>
+            <tr>
+                <td><strong>4.8 — Egreso RECIBIDO PUE</strong></td>
+                <td>Bancos / Proveedores</td>
+                <td>Gasto / Inventario + IVA acreditable pagado</td>
+                <td><strong>Sí</strong> (si se revierte IVA acreditable pagado)</td>
+            </tr>
+            <tr>
+                <td><strong>4.9 — Egreso RECIBIDO PPD</strong></td>
+                <td>Proveedores</td>
+                <td>Gasto / Inventario + IVA acreditable pendiente</td>
+                <td><strong>No</strong> (si solo reduce saldo pendiente)</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <p><strong>Decisiones de automatización:</strong></p>
+    <table>
+        <thead>
+            <tr>
+                <th>Pregunta</th>
+                <th>Respuesta</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>¿CFDI original relacionado obligatorio?</td>
+                <td><strong>Sí</strong></td>
+            </tr>
+            <tr>
+                <td>¿Original debe estar contabilizado?</td>
+                <td><strong>Sí</strong></td>
+            </tr>
+            <tr>
+                <td>¿Nota de crédito parcial se automatiza?</td>
+                <td><strong>Sí</strong> (usar importes de la nota, con validaciones)</td>
+            </tr>
+            <tr>
+                <td>¿Varias facturas relacionadas se automatizan?</td>
+                <td><strong>No</strong> → revisión manual</td>
+            </tr>
+            <tr>
+                <td>¿PUE requiere evidencia de reembolso?</td>
+                <td><strong>Sí</strong> (para revertir IVA cobrado/pagado)</td>
+            </tr>
+            <tr>
+                <td>¿Factura parcialmente pagada requiere revisión?</td>
+                <td><strong>Sí</strong></td>
+            </tr>
+            <tr>
+                <td>¿Retenciones pueden automatizarse?</td>
+                <td><strong>Sí</strong>, si la nota incluye retenciones explícitas; si no, revisión manual</td>
+            </tr>
+            <tr>
+                <td>¿IEPS puede automatizarse?</td>
+                <td><strong>Sí</strong>, si la nota incluye IEPS explícito; si no, revisión manual</td>
+            </tr>
+            <tr>
+                <td>¿Moneda extranjera requiere revisión?</td>
+                <td><strong>Sí</strong></td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="conclusion">
+        <p><strong>Conclusión:</strong> La automatización es viable para los casos simples (PUE sin pagos previos, PPD sin pagos parciales, nota parcial con UUID identificado, impuestos explícitos). Para todos los casos con pagos parciales, REPs, múltiples facturas relacionadas, moneda extranjera, o falta de UUID, <strong>la regla debe ser enviar a revisión manual</strong> para garantizar que el sistema nunca contabilice automáticamente algo que debería requerir criterio profesional.</p>
+    </div>
+
+    <!-- ============ REFERENCIAS NORMATIVAS ============ -->
+    <h2>Referencias normativas</h2>
+
+    <ol class="referencias">
+        <li><strong>Ley del Impuesto al Valor Agregado (LIVA), Artículo 1-B:</strong> Establece que se consideran efectivamente cobradas las contraprestaciones cuando se reciban en efectivo, en bienes o en servicios, o cuando el interés del acreedor quede satisfecho mediante cualquier forma de extinción de las obligaciones. Esto fundamenta la causación del IVA en PUE vs. PPD.[reference:7]</li>
+        <li><strong>Ley del Impuesto al Valor Agregado (LIVA), Artículo 5, fracción III:</strong> Requisito de acreditamiento: que el IVA trasladado al contribuyente haya sido efectivamente pagado en el mes de que se trate. Fundamento para exigir evidencia de reembolso antes de disminuir IVA acreditable pagado.[reference:8]</li>
+        <li><strong>Código Fiscal de la Federación (CFF), Artículos 29 y 29-A:</strong> Regulan la emisión de comprobantes fiscales digitales por Internet (CFDI) y sus tipos (Ingreso, Egreso, Traslado, Pago, Nómina). El CFDI tipo E (Egreso) se fundamenta en estos artículos para amparar devoluciones, descuentos y bonificaciones.[reference:9]</li>
+        <li><strong>Código Fiscal de la Federación (CFF), Artículo 29-A, cuarto párrafo:</strong> Establece plazos para la cancelación de CFDI, diferenciando este procedimiento de la emisión de una nota de crédito (CFDI de Egreso).[reference:10]</li>
+        <li><strong>Ley del Impuesto Especial sobre Producción y Servicios (LIEPS), Artículo 6:</strong> El contribuyente que reciba la devolución de bienes enajenados u otorgue descuentos o bonificaciones deberá restituir el impuesto trasladado y expedir nota de crédito. Fundamento para la reversión de IEPS.[reference:11]</li>
+        <li><strong>Reglamento de la Ley del IEPS, Artículo 3:</strong> Detalla que la restitución del IEPS trasladado y la expedición de nota de crédito deben realizarse antes de efectuar la disminución correspondiente. También aplica cuando no se hubiera enterado previamente el impuesto.[reference:12]</li>
+        <li><strong>Norma de Información Financiera B-15 (NIF B-15), "Conversión de monedas extranjeras":</strong> Establece que las transacciones en moneda extranjera deben reconocerse inicialmente aplicando el tipo de cambio histórico en el momento de la operación. Fundamento para usar el tipo de cambio del CFDI de Egreso.[reference:13]</li>
+        <li><strong>Anexo 20 de la Resolución Miscelánea Fiscal (RMF), Guía de llenado del CFDI 4.0:</strong> Define el catálogo de tipos de comprobante, incluyendo la clave "E" (Egreso), y el nodo <code>CfdiRelacionados</code> con el tipo de relación "01 – Nota de crédito de los documentos relacionados".[reference:14][reference:15]</li>
+        <li><strong>Guía de llenado del CFDI de Egreso (SAT):</strong> Documento que describe cómo aplicar el archivo de egreso debido a un descuento, bonificación o devolución, fundamentado en los Artículos 29 y 29-A del CFF.[reference:16]</li>
+        <li><strong>Criterio normativo 2/IVA/N (SAT):</strong> Sobre el momento en que se consideran efectivamente cobradas las contraprestaciones para efectos del IVA.[reference:17]</li>
+    </ol>
+
+</body>
+</html>

@@ -43,6 +43,12 @@ M3_FLAGS = {
     "EGRESO_IVA_EVIDENCE_MISSING": "egreso_iva_evidence_missing",
     "FX_DIFFERENCE_UNCONFIRMED": "fx_difference_unconfirmed",
     "PARTIAL_PAYMENT_REVERSAL_UNSPECIFIED": "partial_payment_reversal_unspecified",
+    "EGRESO_RELATION_MISSING": "egreso_relation_missing",
+    "EGRESO_MULTIPLE_ORIGINALS": "egreso_multiple_originals",
+    "EGRESO_ORIGINAL_NOT_FOUND": "egreso_original_not_found",
+    "EGRESO_ORIGINAL_NOT_POSTED": "egreso_original_not_posted",
+    "EGRESO_EXCEEDS_ORIGINAL": "egreso_exceeds_original",
+    "EGRESO_PAYMENT_HISTORY_UNAVAILABLE": "egreso_payment_history_unavailable",
 }
 
 
@@ -103,3 +109,11 @@ def test_a_gated_flag_is_still_only_review_state() -> None:
     # §8: posting state is {PROPOSED, POSTED, SKIPPED} and is the validator's alone —
     # so no posting state may be spelled as a review flag.
     assert not {flag.value for flag in ReviewFlagType} & {"proposed", "posted", "skipped"}
+
+
+def test_the_credit_note_blocker_is_not_a_known_payment_condition() -> None:
+    """§8a:212: "the history was not read" is not "the engine knows it was partially paid"."""
+    assert ReviewFlagType.EGRESO_PAYMENT_HISTORY_UNAVAILABLE != (
+        ReviewFlagType.PARTIAL_PAYMENT_REVERSAL_UNSPECIFIED
+    )
+    assert ReviewFlagType.EGRESO_PAYMENT_HISTORY_UNAVAILABLE != ReviewFlagType.MISSING_REP_ORIGINAL

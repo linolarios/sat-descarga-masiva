@@ -57,7 +57,9 @@ from sat_descarga_masiva.contabilidad.validator import (
     PostingEligibilityValidator,
 )
 from sat_descarga_masiva.domain.errors import MappingNotConfigured, UnbalancedJournalCommit
+from sat_descarga_masiva.domain.model.documents import DocumentRecord
 from sat_descarga_masiva.domain.model.fiscal_document import (
+    CfdiRelacionados,
     FiscalDocument,
     FiscalDocumentStatus,
     ParseOutcome,
@@ -76,6 +78,7 @@ from sat_descarga_masiva.domain.model.raw_cfd import (
     RawTrasladoDR,
 )
 from sat_descarga_masiva.domain.model.review import ReviewFlag, ReviewFlags, ReviewFlagType
+from sat_descarga_masiva.domain.model.source import ExtractedXml
 from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
 from sat_descarga_masiva.domain.policy.money import NormalizedAmount
 from sat_descarga_masiva.fiscal.parse import build_fiscal_document
@@ -397,14 +400,22 @@ def _assert_document_level(result: AccountingResult, harness: _Harness) -> None:
     assert harness.clock.calls == 0  # nothing became durable, so nothing was dated (§8:166)
 
 
-@pytest.mark.parametrize("tipo", ["E", "Z"], ids=["egreso", "not-a-cfdi-type"])
-def test_a9_an_unsupported_document_type_is_reviewed_never_posted(tipo: str) -> None:
-    """A9 §8:161/§8:177: an unbuilt row of §8's table waits for a human; `Z` is not a type."""
+def test_a9_an_unsupported_document_type_is_reviewed_never_posted() -> None:
+    """A9 §8:161/§8:177: an unbuilt row of §8's table waits for a human."""
     harness = _harness()
-    result = harness.execute(_processed(_document(tipo=tipo)))
+    result = harness.execute(_processed(_document(tipo="Z")))
 
     _assert_document_level(result, harness)
     assert _flag_types(result) == [ReviewFlagType.UNSUPPORTED_RULE]
+
+
+def test_a9b_a_credit_note_without_a_relation_is_reviewed_on_the_document() -> None:
+    """A9 §8a:212: `E` has rows now, but a note naming no original has none to mirror."""
+    harness = _harness()
+    result = harness.execute(_processed(_document(tipo="E"), perspective=Perspective.EMITIDO))
+
+    _assert_document_level(result, harness)
+    assert _flag_types(result) == [ReviewFlagType.EGRESO_RELATION_MISSING]
 
 
 def test_a10_an_undetermined_perspective_is_never_decided_for_the_human() -> None:
@@ -1069,3 +1080,137 @@ def test_a23_a_rep_is_accounted_against_the_ledger_the_client_holds() -> None:
         (AccountRole.IVA_TRASLADADO_COBRADO, LineSide.HABER, "16.00", "208-001"),
     ]
     assert harness.records == (settled.record,)  # §8:166: appended once, readable back
+
+
+# --- A32-A33: §8a:212's originals, read through the three ports ---------------------------
+
+
+class _Documents:
+    """A `DocumentRepository` holding one row per UUID, recording what was asked for."""
+
+    def __init__(self, records: dict[Uuid, DocumentRecord]) -> None:
+        self._records = records
+        self.asked: list[Uuid] = []
+
+    def get(self, uuid: Uuid) -> DocumentRecord | None:
+        self.asked.append(uuid)
+        return self._records.get(uuid)
+
+    def save(self, record: DocumentRecord) -> None:
+        raise AssertionError("the accounting stage never writes a document projection")
+
+
+class _Xml:
+    """An `ExtractedXmlReader` that only knows the UUIDs it was given."""
+
+    def __init__(self, payloads: dict[str, bytes]) -> None:
+        self._payloads = payloads
+        self.reads: list[str] = []
+
+    def read(self, artifact: ExtractedXml) -> bytes:
+        self.reads.append(artifact.uuid)
+        return self._payloads[artifact.uuid]
+
+
+class _Parser:
+    """A `FiscalXmlParser` answering with one fixed source, counting its calls."""
+
+    def __init__(self, raw: RawCfd) -> None:
+        self._raw = raw
+        self.calls = 0
+
+    def parse(self, xml_bytes: bytes, source_hash: str) -> RawCfd:
+        self.calls += 1
+        return self._raw
+
+
+def _record(uuid: Uuid) -> DocumentRecord:
+    """The stored projection of one archived XML (§4), enough for the seam to re-read it."""
+    return DocumentRecord(
+        uuid=uuid,
+        contributor_rfc=CONTRIBUTOR,
+        perspective=Perspective.EMITIDO,
+        tipo="I",
+        version="4.0",
+        source_hash=SOURCE_HASH,
+        emisor_rfc=EMISOR,
+        first_seen_at=WHEN,
+        last_seen_at=WHEN,
+    )
+
+
+def _note(original: Uuid | None = None, **overrides: object) -> FiscalDocument:
+    """An `E` comprobante naming ``original`` under TipoRelacion 01, and nothing else."""
+    relacion = (CfdiRelacionados("01", (original,)),) if original is not None else ()
+    return replace(_document(tipo="E", **overrides), cfdi_relacionados=relacion)
+
+
+def _note_harness(
+    *,
+    documents: _Documents | None = None,
+    reader: _Xml | None = None,
+    parser: _Parser | None = None,
+) -> tuple[ExecuteAccountingUseCase, InMemoryJournalEntryStore]:
+    """The stage wired with the engine's real propose/validator and the three ports."""
+    provider = _Provider()
+    store = InMemoryJournalEntryStore()
+    use_case = ExecuteAccountingUseCase(
+        mapping=provider,
+        validator=PostingEligibilityValidator(provider, supported_rules=SUPPORTED_RULES),
+        store=store,
+        clock=_Clock(),
+        documents=documents,
+        xml_reader=reader,
+        parser=parser,
+    )
+    return use_case, store
+
+
+def test_a32_a_credit_note_reads_its_original_through_the_three_ports() -> None:
+    """A32 §8a:212: MetodoPago/Total come from the archive, `posted` from the ledger.
+
+    The note states one `01` UUID and nothing about the document it names, so which of §8a:212's
+    four rows books it is decided by a file the note does not contain. The stage resolves that
+    file through the same three ports M2.8 uses and carries the answer as `related_documents`,
+    so the rule proposes the mirror of §8:179 with the evidence flag this slice cannot clear.
+    """
+    documents = _Documents({ORIGINAL: _record(ORIGINAL)})
+    reader = _Xml({ORIGINAL.value: b"cfdi/"})
+    parser = _Parser(_raw(metodo_pago="PUE"))
+    use_case, store = _note_harness(documents=documents, reader=reader, parser=parser)
+    store.append(_posted_original())
+
+    result = use_case.execute(
+        _processed(_note(ORIGINAL), perspective=Perspective.EMITIDO),
+        contributor_rfc=CONTRIBUTOR,
+    )
+
+    assert (documents.asked, reader.reads, parser.calls) == ([ORIGINAL], [ORIGINAL.value], 1)
+    assert result.decision.entry is not None, result.decision.review_flags
+    assert [flag.flag_type for flag in result.decision.review_flags] == [
+        ReviewFlagType.EGRESO_IVA_EVIDENCE_MISSING
+    ]
+    assert result.decision.posting_state is PostingState.PROPOSED
+    entry = _entry(result.decision)
+    assert entry.rule_id == "4.6"
+    assert entry.is_balanced()
+    assert result.record is not None  # a PROPOSED decision is still the audit evidence (§8:167)
+    assert documents.asked == [ORIGINAL]
+    assert reader.reads == [ORIGINAL.value]
+    assert parser.calls == 1
+
+
+def test_a33_an_unwired_original_is_a_review_not_a_crash() -> None:
+    """A33 §8a:212: with no ports wired the method is unknown, so no row is selected."""
+    use_case, _ = _note_harness()
+
+    result = use_case.execute(
+        _processed(_note(ORIGINAL), perspective=Perspective.EMITIDO),
+        contributor_rfc=CONTRIBUTOR,
+    )
+
+    assert [flag.flag_type for flag in result.decision.review_flags] == [
+        ReviewFlagType.MISSING_SOURCE_FIELD
+    ]
+    assert result.decision.entry is None  # no rule says how the note books, so nothing is keyed
+    assert result.decision.posting_state is PostingState.PROPOSED
