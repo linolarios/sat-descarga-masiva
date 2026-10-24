@@ -5,8 +5,10 @@ source is resolved from the metadata observation, and a *later* cancellation nev
 was posted. The two cases it names are different claims, so they are distinct rules here:
 
 - **4.15a** — cancelled and never posted. There is no accounting fact to reverse, so nothing is
-  booked and nothing is reversed: the entry is ``SKIPPED``. That is not a review case (§8:161:
-  no human decision is needed), and it must never fabricate a reversal.
+  booked and nothing is reversed: the entry is ``SKIPPED``, dated by the cancellation's own
+  effective date. That is not a review case (§8:161: no human decision is needed), and it must
+  never fabricate a reversal — nor a date: an undated cancellation has no key to record under, so
+  it is refused on the document (§8a:218) rather than dated by the invoice's ``Fecha``.
 - **4.15b** — cancelled after being posted. The original record is a permanent historical fact
   (§8:167/194), so the correction is a *new* compensating entry: every leg of the posted fact is
   inverted (DEBE to HABER, HABER to DEBE) with the same amount, the same account role and the
@@ -23,8 +25,10 @@ resolves the history and the cancellation date into `PostingContext`
 credit-note seams, so this module imports no store, no adapter and no I/O (§4).
 
 Only ``POSTED`` history is a reversal candidate: a ``PROPOSED`` refusal or a ``SKIPPED`` row moved
-nothing. A source with two ``POSTED`` records is refused loudly rather than guessed: one source
-has one accounting fact, and §8:194 forbids a silent re-post of a source already in the journal.
+nothing. A source with two ``POSTED`` records is refused loudly rather than guessed: §8:194 gives
+one source one accounting fact, so *which* of the two a cancellation would reverse is an ambiguity
+this rule declines to adjudicate (§8a:221). It neither picks a winner nor assumes the ledger
+re-posted by itself — it stops and asks for the ruling.
 """
 
 from __future__ import annotations
@@ -42,21 +46,24 @@ from sat_descarga_masiva.contabilidad.rules.contract import (
     ReviewRequest,
     Skip,
     _flag,
-    _recordability_flags,
 )
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocumentStatus
-from sat_descarga_masiva.domain.model.review import ReviewFlagType
+from sat_descarga_masiva.domain.model.review import ReviewFlag, ReviewFlagType
 
 #: The two outcomes of §8:194. They are separate rule ids because they are separate claims: a
 #: skip moved nothing and a reversal moves an exact mirror, so they must never share an entry key.
 RULE_4_15A = "4.15a"
 RULE_4_15B = "4.15b"
 
-#: Bumped only when a decision below changes: §8:194 keys every posting by it.
-RULE_VERSION = "1"
+#: §8:194 keys every posting by (rule_id, rule_version), so the two rows are versioned apart: a
+#: change to one decision can never re-identify the other. 4.15a is v2 because an undated
+#: cancellation is now refused on the document (§8a:218) instead of dated by the invoice's Fecha;
+#: 4.15b's decision — legs, accounts, date provenance, flag — is unchanged.
+RULE_VERSION_4_15A = "2"
+RULE_VERSION_4_15B = "1"
 
 #: The registry ids the §8:194 rules answer under.
-CANCELLATION_RULE_VERSIONS = {RULE_4_15A: RULE_VERSION, RULE_4_15B: RULE_VERSION}
+CANCELLATION_RULE_VERSIONS = {RULE_4_15A: RULE_VERSION_4_15A, RULE_4_15B: RULE_VERSION_4_15B}
 
 #: Prefix of every reversal line key. The stable historical identity of a leg is its own key, so
 #: a retry derives the identical key and two distinct historical legs never collide.
@@ -87,8 +94,10 @@ def _posted_entries(request: PostingContext) -> tuple[JournalEntryRecord, ...]:
 
     A ``PROPOSED`` refusal and a ``SKIPPED`` row moved nothing, so neither is a fact that a
     cancellation can undo. Two ``POSTED`` records for one source are not a policy question the
-    engine may answer by picking one: they mean the ledger holds the same source twice, which
-    §8:194 forbids, and no reversal can say which of the two is the accounting fact.
+    engine may answer by picking one: §8:194 gives one source one accounting fact, so *which* of
+    the two a cancellation would reverse is an ambiguity this rule declines to adjudicate
+    (§8a:221). It does not claim a silent re-post happened — the cause is not adjudicated here —
+    it refuses to name a reversal target it cannot justify.
     """
     posted = tuple(
         record for record in request.previous_entries if record.posting_state is PostingState.POSTED
@@ -97,9 +106,9 @@ def _posted_entries(request: PostingContext) -> tuple[JournalEntryRecord, ...]:
         keys = ", ".join(record.entry_key for record in posted)
         raise ValueError(
             f"§8:194: source {request.document.source_uuid} holds {len(posted)} POSTED"
-            f" entries [{keys}]: one source has one accounting fact, a second POSTED record is"
-            " a silent re-post, so the cancellation target needs a human ruling rather than a"
-            " first-wins pick"
+            f" entries [{keys}]: one source has one accounting fact, so which of them a"
+            " cancellation reverses is an ambiguity this rule declines to adjudicate — the"
+            " target needs a human ruling rather than a first-wins pick (§8a:221)"
         )
     return posted
 
@@ -134,7 +143,7 @@ def _reversal(request: PostingContext, record: JournalEntryRecord) -> ReviewRequ
     return ReviewRequest(
         entry=ProposedJournalEntry(
             rule_id=RULE_4_15B,
-            rule_version=RULE_VERSION,
+            rule_version=RULE_VERSION_4_15B,
             contributor_rfc=request.contributor_rfc,
             source_uuid=record.source_uuid,
             source_hash=record.source_hash,
@@ -190,19 +199,26 @@ def _historical_accounts(record: JournalEntryRecord) -> dict[AccountRole, str]:
 
 
 def _skip(request: PostingContext) -> Skip | ReviewRequest:
-    """Cancelled with nothing posted: ``SKIPPED``, and never a fabricated reversal (§8:194)."""
+    """Cancelled with nothing posted: ``SKIPPED``, and never a fabricated reversal (§8:194).
+
+    The record is dated by the cancellation's own effective date and by nothing else (§8a:218):
+    ``FiscalDocument.fecha`` is the *invoice's* date and says nothing about when the cancellation
+    took effect, so an undated cancellation is handed to `_unkeyable` rather than dated by it.
+    A dated cancellation whose document carries no ``Fecha`` still skips — the invoice's date is
+    simply not a fact this rule reads.
+    """
     document = request.document
-    entry_date = request.cancellation_effective_on or document.fecha
-    if document.source_uuid is None or entry_date is None:
+    effective_on = request.cancellation_effective_on
+    if effective_on is None or document.source_uuid is None:
         return _unkeyable(request)
     return Skip(
         entry=ProposedJournalEntry(
             rule_id=RULE_4_15A,
-            rule_version=RULE_VERSION,
+            rule_version=RULE_VERSION_4_15A,
             contributor_rfc=request.contributor_rfc,
             source_uuid=document.source_uuid,
             source_hash=document.source_hash,
-            entry_date=entry_date,
+            entry_date=effective_on,
             lines=(),
         ),
         detail="the source was cancelled before it was ever posted: there is no accounting"
@@ -211,10 +227,35 @@ def _skip(request: PostingContext) -> Skip | ReviewRequest:
 
 
 def _unkeyable(request: PostingContext) -> ReviewRequest:
-    """A cancellation that cannot be keyed is flagged on the document (§8a:209/§8:194)."""
+    """A cancellation that cannot be keyed is flagged on the document (§8a:218/§8:194).
+
+    An entry is keyed by (source UUID, date, rule, version): without either half there is no key
+    to record under, and inventing one is worse than flagging the document itself (§8:167). The
+    date half is the *cancellation's* effective date — never the invoice's ``Fecha`` — so an
+    undated cancellation is `MISSING_SOURCE_FIELD` even when the document is fully dated. Both
+    reasons travel together when both halves are missing, so a human sees the whole refusal.
+    """
+    document = request.document
+    flags: list[ReviewFlag] = []
+    if request.cancellation_effective_on is None:
+        flags.append(
+            _flag(
+                ReviewFlagType.MISSING_SOURCE_FIELD,
+                f"source {document.source_uuid} was cancelled and the cancellation states no"
+                " FechaCancelacion: §8a:218 dates a cancellation by its own effective date,"
+                " never by the invoice's Fecha, by recorded_at, by retrieved_at or by today",
+            )
+        )
+    if document.source_uuid is None:
+        flags.append(
+            _flag(
+                ReviewFlagType.MISSING_POSTING_IDENTITY,
+                "no TFD UUID: §8:194 keys the entry by it, so there is nothing to record",
+            )
+        )
     return ReviewRequest(
-        flags=_recordability_flags(request.document),
+        flags=tuple(flags),
         detail="a cancellation decision without the identity an entry is keyed by (a source"
-        " UUID and a date) is flagged on the document: nothing is recorded under an invented"
-        " key",
+        " UUID and the cancellation's own effective date) is flagged on the document: nothing"
+        " is recorded under an invented key",
     )

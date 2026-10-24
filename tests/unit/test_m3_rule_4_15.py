@@ -1,10 +1,12 @@
-"""M3 step T1/T2: rule 4.15 — a cancelled source, reversed or skipped (§8:194).
+"""M3 step T1/T2/T6: rule 4.15 — a cancelled source, reversed or skipped (§8:194).
 
 §8:194 is the one place where a *fiscal state* — not a document shape — decides the accounting
 answer, and it gives two answers to two different histories:
 
 - **4.15a** — cancelled and never posted: nothing moved, so nothing is reversed. The entry is
-  ``SKIPPED``, carries no legs and needs no human decision (§8:161).
+  ``SKIPPED``, dated by the cancellation's own effective date, carries no legs and needs no human
+  decision (§8:161). An undated cancellation is *not* dated by ``Fecha`` instead: it has no key to
+  record under, so it is refused on the document (§8a:218).
 - **4.15b** — cancelled after being posted: the original record is permanent (§8:166), so the
   correction is a new compensating entry that inverts every leg — same role, same amount, same
   *posted* account, opposite side — dated by the cancellation's effective date and flagged
@@ -12,8 +14,9 @@ answer, and it gives two answers to two different histories:
 
 What these tests pin, in that order: the exact inversion (leg for leg), the historical accounts
 (not today's chart), the date provenance (never ``Fecha``/``retrieved_at``/today), the blocking
-flag with ``PROPOSED`` and never ``POSTED``, the skip path, the two refusals (no effective date;
-two ``POSTED`` records), and the fact that every other fiscal state is untouched by 4.15.
+flag with ``PROPOSED`` and never ``POSTED``, the skip path, the refusals (no cancellation date on
+either branch, no source UUID, two ``POSTED`` records), the per-rule versions, and the fact that
+every other fiscal state is untouched by 4.15.
 """
 
 from dataclasses import replace
@@ -33,10 +36,12 @@ from sat_descarga_masiva.contabilidad.journal import (
 )
 from sat_descarga_masiva.contabilidad.roles import AccountRole
 from sat_descarga_masiva.contabilidad.rules.cancellation import (
+    CANCELLATION_RULE_VERSIONS,
     CANCELLATION_SKIP_RULE_IDS,
     RULE_4_15A,
     RULE_4_15B,
-    RULE_VERSION,
+    RULE_VERSION_4_15A,
+    RULE_VERSION_4_15B,
     cancellation,
 )
 from sat_descarga_masiva.contabilidad.rules.contract import (
@@ -93,11 +98,10 @@ def _money(text: str) -> NormalizedAmount:
 
 
 class _Chart:
-    """A `MappingProvider` that answers one fixed chart (§8a:207), and records who asked."""
+    """A `MappingProvider`'s fixed chart (§8a:207), handed to the validator as ``mapping``."""
 
     def __init__(self) -> None:
         self.mapping = AccountMapping(MAPPING_VERSION, _ACCOUNTS, _CLASSIFICATION)
-        self.asked: list[Rfc] = []
 
 
 def _raw(**overrides: object) -> RawCfd:
@@ -238,10 +242,6 @@ def _decide(context: PostingContext, chart: _Chart | None = None) -> PostingDeci
     validator = PostingEligibilityValidator(resolved, supported_rules=SUPPORTED_RULES)
     return validator.decide(context, propose(context), mapping=resolved.mapping)
 
-    def mapping_for(self, client_rfc: Rfc) -> AccountMapping:
-        self.asked.append(client_rfc)
-        return self.mapping
-
 
 # --- 4.15a: cancelled before it was ever posted (§8:161/194) ---------------------------
 
@@ -252,19 +252,68 @@ def test_4_15a_a_cancelled_source_with_no_history_is_skipped() -> None:
 
     assert isinstance(proposal, Skip), proposal
     assert proposal.entry.rule_id == RULE_4_15A
-    assert proposal.entry.rule_version == RULE_VERSION
+    assert proposal.entry.rule_version == RULE_VERSION_4_15A
     assert proposal.entry.lines == ()
     assert proposal.entry.source_uuid == UUID
     assert proposal.entry.contributor_rfc == CONTRIBUTOR
 
 
-def test_4_15a_is_dated_by_the_cancellation_or_by_the_document_but_never_by_today() -> None:
-    """§8a:203/209: a cancellation with a date dates the skip; without one, the invoice does."""
-    dated = cancellation(_context(previous=(), effective_on=CANCELLED_ON))
-    assert _entry(dated).entry_date == CANCELLED_ON
+def test_4_15a_is_dated_by_the_cancellation_and_by_nothing_else() -> None:
+    """§8a:218: the cancellation dates its own record — never the invoice, never a clock."""
+    entry = _entry(cancellation(_context(previous=(), effective_on=CANCELLED_ON)))
 
-    undated = cancellation(_context(previous=(), effective_on=None))
-    assert _entry(undated).entry_date == INVOICE_DATE
+    assert entry.entry_date == CANCELLED_ON
+    assert entry.entry_date != INVOICE_DATE
+    assert entry.entry_date != POSTED_AT.date()
+    assert entry.entry_date != RETRIEVED_AT.date()
+
+
+def test_4_15a_without_an_effective_date_refuses_on_the_document() -> None:
+    """§8a:218 + §8:167: an undated cancellation is a document refusal, never a dated skip."""
+    proposal = _refusal(cancellation(_context(previous=(), effective_on=None)))
+
+    assert proposal.entry is None
+    assert _flags(proposal) == [ReviewFlagType.MISSING_SOURCE_FIELD]
+    assert "FechaCancelacion" in proposal.flags[0].reason
+
+    decision = _decide(_context(previous=(), effective_on=None))
+    assert decision.entry is None
+    assert decision.posting_state is PostingState.PROPOSED
+    assert [flag.flag_type for flag in decision.review_flags] == [
+        ReviewFlagType.MISSING_SOURCE_FIELD
+    ]
+
+
+def test_4_15a_without_a_source_uuid_is_flagged_on_the_document() -> None:
+    """§8:194: the record is keyed by the TFD UUID, so an unkeyable cancellation is refused."""
+    proposal = _refusal(
+        cancellation(_context(document=replace(_document(), source_uuid=None), previous=()))
+    )
+
+    assert proposal.entry is None
+    assert _flags(proposal) == [ReviewFlagType.MISSING_POSTING_IDENTITY]
+
+    both = _refusal(
+        cancellation(
+            _context(
+                document=replace(_document(), source_uuid=None),
+                previous=(),
+                effective_on=None,
+            )
+        )
+    )
+    assert _flags(both) == [
+        ReviewFlagType.MISSING_SOURCE_FIELD,
+        ReviewFlagType.MISSING_POSTING_IDENTITY,
+    ]
+
+
+def test_4_15a_still_skips_when_only_the_invoice_date_is_missing() -> None:
+    """§8a:218: ``Fecha`` is not a fact 4.15a reads, so its absence changes nothing."""
+    proposal = cancellation(_context(document=_document(fecha=None), previous=()))
+
+    assert isinstance(proposal, Skip), proposal
+    assert proposal.entry.entry_date == CANCELLED_ON
 
 
 def test_4_15a_is_the_only_cancellation_skip_and_the_validator_honours_it() -> None:
@@ -318,7 +367,7 @@ def test_4_15b_inverts_every_posted_leg_exactly() -> None:
     entry = _entry(_refusal(cancellation(_context(previous=(_posted_record(),)))))
 
     assert entry.rule_id == RULE_4_15B
-    assert entry.rule_version == RULE_VERSION
+    assert entry.rule_version == RULE_VERSION_4_15B
     assert _legs(entry) == [
         (AccountRole.GASTO, LineSide.HABER, "100.00"),
         (AccountRole.IVA_ACRED_PAGADO, LineSide.HABER, "16.00"),
@@ -428,12 +477,15 @@ def test_4_15b_without_an_effective_date_refuses_on_the_document() -> None:
 
 
 def test_two_posted_records_are_refused_rather_than_guessed() -> None:
-    """§8:194: one source has one accounting fact; two of them need a human, not a first pick."""
+    """§8:194/§8a:221: two POSTED rows are an ambiguity the rule declines to adjudicate."""
     first = _posted_record(entry_key="first-posted")
     second = _posted_record(entry_key="second-posted")
 
-    with pytest.raises(ValueError, match="first-posted, second-posted"):
+    with pytest.raises(ValueError, match="first-posted, second-posted") as refused:
         cancellation(_context(previous=(first, second)))
+
+    assert "ambiguity" in str(refused.value)
+    assert "silent re-post" not in str(refused.value)
 
 
 def test_a_posted_record_with_an_unresolved_leg_cannot_even_be_built() -> None:
@@ -526,5 +578,10 @@ def test_an_unknown_source_is_not_a_cancellation_case() -> None:
 
 def test_the_cancellation_rows_are_registered_under_their_own_ids() -> None:
     """§8:159: the validator refuses a rule id the engine does not know, so both are registered."""
-    assert SUPPORTED_RULES[RULE_4_15A] == RULE_VERSION
-    assert SUPPORTED_RULES[RULE_4_15B] == RULE_VERSION
+    assert SUPPORTED_RULES[RULE_4_15A] == RULE_VERSION_4_15A == "2"
+    assert SUPPORTED_RULES[RULE_4_15B] == RULE_VERSION_4_15B == "1"
+
+
+def test_the_two_cancellation_rows_are_versioned_apart() -> None:
+    """§8:194 keys a posting by (rule id, version): a 4.15a change never re-identifies 4.15b."""
+    assert CANCELLATION_RULE_VERSIONS == {RULE_4_15A: "2", RULE_4_15B: "1"}

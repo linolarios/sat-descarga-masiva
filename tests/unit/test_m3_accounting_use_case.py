@@ -498,23 +498,24 @@ def test_a14_an_unresolved_source_state_is_refused_and_the_refusal_is_recorded()
     ]
 
 
-def test_a14_a_cancelled_document_is_skipped_not_refused() -> None:
-    """A14 §8:194: a cancelled source with no posted history is 4.15a — a skip, not a refusal.
+def test_a14_a_cancelled_document_without_a_date_is_proposed_not_skipped() -> None:
+    """A14 §8a:218: a cancelled source with no posted history is 4.15a — and 4.15a needs its date.
 
     The projection can already carry ``CANCELLED`` (the metadata join is one way to learn it), and
-    what the engine owes it is the *same* answer: nothing was posted, so nothing is reversed and no
-    human decision is needed (§8:161).
+    the answer it is owed is the skip: nothing was posted, so nothing is reversed and no human
+    decision is needed (§8:161). What the engine must not do is date that skip by the invoice's
+    ``Fecha``: with no ``FechaCancelacion`` there is no key to record under, so the refusal lands
+    on the document and nothing is appended.
     """
     harness = _harness()
     result = harness.execute(_processed(_document(status=FiscalDocumentStatus.CANCELLED)))
 
-    assert result.decision.posting_state is PostingState.SKIPPED
-    assert result.decision.review_flags == ()
-    assert _entry(result.decision) is not None
-    assert _entry(result.decision).rule_id == "4.15a"
-    assert result.record is not None
-    assert result.record.lines == ()
-    assert harness.records == (result.record,)
+    assert result.decision.posting_state is PostingState.PROPOSED
+    assert result.decision.entry is None
+    assert result.record is None
+    assert _flag_types(result) == [ReviewFlagType.MISSING_SOURCE_FIELD]
+    assert harness.records == ()
+    assert harness.clock.calls == 0
 
 
 def test_a15_a_foreign_currency_document_is_refused_unless_its_rate_is_resolved() -> None:
@@ -968,17 +969,20 @@ def test_a31_a_vigente_observation_resolves_the_unknown_status_and_the_document_
 def test_a31_a_cancelled_observation_skips_a_source_that_was_never_posted() -> None:
     """A31 §8:159/194: the SAT's cancellation outranks the projection's VIGENTE.
 
-    Nothing was posted, so there is no fact to reverse: 4.15a answers with ``SKIPPED`` and the
-    entry carries no legs. The cancellation's own date is not invented either — with no
-    ``FechaCancelacion`` the document's ``Fecha`` dates the record (§8a:209).
+    Nothing was posted, so there is no fact to reverse: 4.15a answers with ``SKIPPED``, carries no
+    legs and is dated by the cancellation's own ``FechaCancelacion`` (§8a:218) — never by the
+    document's ``Fecha``, which says nothing about when the cancellation took effect.
     """
-    harness = _harness_joined(_observation(FiscalDocumentStatus.CANCELLED))
+    harness = _harness_joined(
+        _observation(FiscalDocumentStatus.CANCELLED, cancellation_date=CANCELLED_ON)
+    )
     result = harness.execute(_processed(_document(status=FiscalDocumentStatus.VIGENTE)))
 
     assert result.decision.posting_state is PostingState.SKIPPED
     assert result.decision.review_flags == ()
     assert _entry(result.decision) is not None
     assert _entry(result.decision).rule_id == "4.15a"
+    assert _entry(result.decision).entry_date == CANCELLED_ON
     assert result.record is not None
     assert result.record.lines == ()
     assert ReviewFlagType.INELIGIBLE_SOURCE_STATE not in _flag_types(result)
@@ -1086,6 +1090,23 @@ def test_a36_a_cancellation_with_no_effective_date_writes_nothing() -> None:
     assert _flag_types(result) == [ReviewFlagType.MISSING_SOURCE_FIELD]
     assert harness.records == (original,)
     assert harness.clock.calls == 1  # only the original posting was dated
+
+
+def test_a37_a_cancelled_source_that_was_never_posted_writes_nothing() -> None:
+    """A37 §8a:218 + §8:167: no cancellation date and nothing posted means nothing is recorded.
+
+    The invoice's ``Fecha`` is not a cancellation date, so 4.15a refuses on the document instead
+    of appending a ``SKIPPED`` row under a date the cancellation never asserted.
+    """
+    harness = _harness_joined(_observation(FiscalDocumentStatus.CANCELLED))
+    result = harness.execute(_processed(_document(status=FiscalDocumentStatus.VIGENTE)))
+
+    assert result.decision.posting_state is PostingState.PROPOSED
+    assert result.decision.entry is None
+    assert result.record is None
+    assert _flag_types(result) == [ReviewFlagType.MISSING_SOURCE_FIELD]
+    assert harness.records == ()
+    assert harness.clock.calls == 0
 
 
 # --- T23: a REP is accounted against the ledger, not against what it states (§8:184/§8:192) --
