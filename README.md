@@ -12,9 +12,8 @@ make hooks
 make check     # ruff + mypy(strict) + unit tests -> green
 ```
 
-- **`AGENT.md`** — TDD-first operating guide + build order.
-- **`ARCHITECTURE.md`** — hexagonal design, ports, policies, SAT flow, error taxonomy.
-- **`docs/`** — drop the SAT PDFs here.
+- **`AGENT.md`** — TDD-first operating guide + build order (architecture: §4; accounting: §8; testing: §12).
+- **`docs/`** — working notes (`velocity.md`); drop the SAT metadata sample here to unblock M3's metadata producer.
 
 Layers: `domain ← application (ports/policies/use_cases) ← infrastructure`, thin `facade`.
 Dependency rule: no SAT/SOAP/XML/HTTP/crypto outside `infrastructure`.
