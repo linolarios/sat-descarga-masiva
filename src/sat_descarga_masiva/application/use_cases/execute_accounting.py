@@ -73,13 +73,20 @@ from sat_descarga_masiva.application.ports.persistence import (
 from sat_descarga_masiva.application.ports.services import Clock
 from sat_descarga_masiva.application.ports.source import ExtractedXmlReader
 from sat_descarga_masiva.contabilidad.classification import Classification
-from sat_descarga_masiva.contabilidad.journal import JournalEntryRecord, LineSide, PostingState
+from sat_descarga_masiva.contabilidad.fx import FXRateResolutionPolicy
+from sat_descarga_masiva.contabilidad.journal import (
+    JournalEntryRecord,
+    LineSide,
+    PostingState,
+    ProposedJournalEntry,
+)
 from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, RelatedDocument
 from sat_descarga_masiva.contabilidad.rules.posting import propose
 from sat_descarga_masiva.contabilidad.validator import (
     PostingDecision,
     PostingEligibilityValidator,
 )
+from sat_descarga_masiva.contabilidad.valuation import value_entry
 from sat_descarga_masiva.domain.enums.comprobante import TipoComprobante
 from sat_descarga_masiva.domain.errors import UnbalancedJournalCommit
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument, FiscalDocumentStatus
@@ -125,12 +132,17 @@ class ExecuteAccountingUseCase:
         documents: DocumentRepository | None = None,
         xml_reader: ExtractedXmlReader | None = None,
         parser: FiscalXmlParser | None = None,
+        fx: FXRateResolutionPolicy | None = None,
     ) -> None:
         self._mapping = mapping
         self._validator = validator
         self._store = store
         self._clock = clock
         self._snapshots = snapshots
+        #: §8a:226's chain. Without an injected policy the source document's own `TipoCambio`
+        #: is the only rung — truthful, because no configured provider was approved or wired,
+        #: and an absent rate is then `AMBIGUOUS_FX` rather than a guessed conversion.
+        self._fx = fx if fx is not None else FXRateResolutionPolicy()
         self._sources = _OriginalSources(documents, xml_reader, parser)
 
     def execute(self, processed: ProcessedDocument, *, contributor_rfc: Rfc) -> AccountingResult:
@@ -154,7 +166,16 @@ class ExecuteAccountingUseCase:
             related=_related_documents(document, contributor_rfc, self._store, self._sources),
             cancellation_effective_on=fiscal.cancellation_effective_on,
         )
-        decision = self._validator.decide(context, propose(context), mapping=mapping)
+        # §8a:226 — the conversion is resolved once, before the gate, for a proposal that could
+        # become a posting. A skip or a rule's own refusal posts nothing, so no rate is asked
+        # for a document whose treatment is already `PROPOSED`.
+        proposal = propose(context)
+        valued = (
+            value_entry(proposal, document=merged, policy=self._fx)
+            if isinstance(proposal, ProposedJournalEntry)
+            else None
+        )
+        decision = self._validator.decide(context, proposal, mapping=mapping, valued=valued)
         if decision.entry is None:
             return AccountingResult(decision=decision)
         record = decision.to_record(recorded_at=self._clock.now())

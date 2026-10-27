@@ -19,11 +19,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 import yaml
 
+from sat_descarga_masiva.application.ports.accounting import FXSource
 from sat_descarga_masiva.application.ports.persistence import MetadataSnapshotStore
 from sat_descarga_masiva.application.use_cases.execute_accounting import (
     AccountingResult,
@@ -298,10 +300,29 @@ def test_a_traslado_is_skipped_with_no_legs_and_a_recomputable_key() -> None:
     assert chain.appended() == (record,)
 
 
-def test_a_foreign_currency_document_is_recorded_as_proposed_never_posted() -> None:
-    """§8:193: without a resolved rate there is no deterministic valuation, so a human decides."""
+def test_a_foreign_currency_document_posts_at_the_rate_the_cfdi_states() -> None:
+    """§8:193/§8a:227: the CFDI's own TipoCambio values the entry, and the ledger says so."""
     chain = _chain()
     result = chain.execute(_projected(_raw(moneda="USD", tipo_cambio="17.5")))
+
+    assert result.decision.posting_state is PostingState.POSTED
+    record = result.record
+    assert record is not None
+    assert record.posting_state is PostingState.POSTED
+    assert chain.appended() == (record,)
+    # §8a:230 — per-leg conversion at `MoneyPolicy`'s scale, still exactly balanced.
+    assert [str(line.amount.amount) for line in record.lines] == ["1750.00", "280.00", "2030.00"]
+    # §8a:231 — the valuation travels with the posting it produced.
+    assert (record.valuation_source, record.valuation_rate) == (
+        FXSource.SOURCE_DOCUMENT,
+        Decimal("17.5"),
+    )
+
+
+def test_a_foreign_currency_document_with_no_stated_rate_is_recorded_as_proposed() -> None:
+    """§8:193/§8a:229: no rate anywhere in the chain ⇒ `AMBIGUOUS_FX`, never a guess."""
+    chain = _chain()
+    result = chain.execute(_projected(_raw(moneda="USD")))
 
     assert result.decision.posting_state is PostingState.PROPOSED
     assert ReviewFlagType.AMBIGUOUS_FX in [flag.flag_type for flag in result.decision.review_flags]

@@ -67,6 +67,12 @@ class ReviewFlagType(StrEnum):
     FX_DIFFERENCE_UNCONFIRMED = "fx_difference_unconfirmed"
     PARTIAL_PAYMENT_REVERSAL_UNSPECIFIED = "partial_payment_reversal_unspecified"
 
+    # §8a:233 — approved review vocabulary for a credit note that affects **IVA retenido**: the
+    # accounting/declaration treatment of the withholding adjustment cannot be determined, so a
+    # human decides. It says nothing about whether the retention was remitted — and there is
+    # deliberately no flag for "already remitted", because no evidence port can prove it.
+    RETENCION_IVA_ADJUSTMENT_REQUIRES_REVIEW = "retencion_iva_adjustment_requires_review"
+
     # §8a:212 credit notes — the two evidence gaps this milestone cannot observe, and the four
     # relation facts that keep a note from being claimed at all. The first two are *blocking*: an
     # entry is produced and may not post. The rest are refusals a human resolves.

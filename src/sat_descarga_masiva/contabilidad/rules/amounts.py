@@ -36,6 +36,7 @@ from sat_descarga_masiva.contabilidad.rules.contract import (
     _recordability_flags,
     _review,
 )
+from sat_descarga_masiva.domain.enums.comprobante import TipoComprobante
 from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument
 from sat_descarga_masiva.domain.model.review import ReviewFlag, ReviewFlagType
 from sat_descarga_masiva.domain.model.value_objects import Uuid
@@ -223,8 +224,25 @@ def unbookable_tax(document: FiscalDocument) -> ReviewFlag | None:
     Retenciones and every other impuesto are *not* silently dropped — dropping them would
     produce an entry that does not state what the document says — so the document is reviewed
     instead, with the elements named.
+
+    One shape has a word of its own: a **credit note carrying IVA retenido** is refused with
+    `RETENCION_IVA_ADJUSTMENT_REQUIRES_REVIEW` (§8a:233), the approved vocabulary for "the
+    treatment of this withholding adjustment cannot be determined", whose reason records
+    remittance status as *unknown* — never as remitted or not remitted. The routing is scoped to
+    `E` + `002`, so every other retención (4.1–4.5's comprobantes, ISR alone, other taxes) keeps
+    this shared `UNSUPPORTED_RULE` refusal and no unrelated rule changes word.
     """
     if document.impuestos.retenciones:
+        retained_iva = any(
+            retencion.impuesto == IVA_IMPUESTO for retencion in document.impuestos.retenciones
+        )
+        if retained_iva and TipoComprobante.of(document.tipo) is TipoComprobante.EGRESO:
+            return _flag(
+                ReviewFlagType.RETENCION_IVA_ADJUSTMENT_REQUIRES_REVIEW,
+                "the credit note carries IVA retenido (002): the accounting and declaration"
+                " treatment of that withholding adjustment is not established, and its"
+                " remittance status is unknown (§8a:233)",
+            )
         return _flag(
             ReviewFlagType.UNSUPPORTED_RULE,
             "the document carries retenciones, which §8:179–182's entries do not book",

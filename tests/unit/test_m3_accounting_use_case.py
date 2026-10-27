@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from sat_descarga_masiva.application.ports.accounting import AccountMapping
+from sat_descarga_masiva.application.ports.accounting import AccountMapping, FXSource
 from sat_descarga_masiva.application.use_cases.execute_accounting import (
     AccountingResult,
     ExecuteAccountingUseCase,
@@ -518,13 +518,40 @@ def test_a14_a_cancelled_document_without_a_date_is_proposed_not_skipped() -> No
     assert harness.clock.calls == 0
 
 
-def test_a15_a_foreign_currency_document_is_refused_unless_its_rate_is_resolved() -> None:
-    """A15 §8:193: no resolved rate means no deterministic valuation, so no posting."""
+def test_a15_a_foreign_currency_document_posts_at_the_rate_it_states() -> None:
+    """A15 §8a:227/231: the document's own TipoCambio values the entry, and the evidence stays."""
     harness = _harness()
     result = harness.execute(_processed(_document(moneda="USD", tipo_cambio="17.5")))
 
-    _assert_proposed_record(result, harness)
-    assert ReviewFlagType.AMBIGUOUS_FX in _flag_types(result)
+    record = result.record
+    assert record is not None
+    assert result.decision.posting_state is PostingState.POSTED
+    assert harness.records == (record,)
+    # §8a:230 — every leg is converted at the stated rate and rounded once, in pesos.
+    assert _legs(record) == [
+        (AccountRole.GASTO, LineSide.DEBE, "1750.00", "601-001"),
+        (AccountRole.IVA_ACRED_PAGADO, LineSide.DEBE, "280.00", "118-001"),
+        (AccountRole.CLEARING, LineSide.HABER, "2030.00", "102-099"),
+    ]
+    # §8a:231 — the conversion is recorded with the posting it produced.
+    assert record.valuation_rate == Decimal("17.5")
+    assert record.valuation_source is FXSource.SOURCE_DOCUMENT
+    assert record.valuation_date == date(2024, 5, 15)
+
+
+def test_a15b_a_foreign_currency_document_that_states_no_rate_is_proposed() -> None:
+    """A15 §8:193/§8a:229: no stated rate and no configured rung ⇒ `AMBIGUOUS_FX`, no guess."""
+    harness = _harness()
+    result = harness.execute(_processed(_document(moneda="USD")))
+
+    record = _assert_proposed_record(result, harness)
+    assert _flag_types(result) == [ReviewFlagType.AMBIGUOUS_FX]
+    # §8a:231 — nothing was converted, so no valuation evidence is recorded.
+    assert (record.valuation_date, record.valuation_source, record.valuation_rate) == (
+        None,
+        None,
+        None,
+    )
 
 
 def test_a16_an_unmapped_role_is_never_defaulted_to_an_account() -> None:
@@ -606,10 +633,11 @@ class _RecordingValidator:
         proposal: Any,
         *,
         mapping: AccountMapping | None = None,
+        valued: Any = None,
     ) -> PostingDecision:
         self.calls += 1
         self.mappings.append(mapping)
-        return self.inner.decide(request, proposal, mapping=mapping)
+        return self.inner.decide(request, proposal, mapping=mapping, valued=valued)
 
 
 class _SpyMapping(AccountMapping):
@@ -829,6 +857,7 @@ class _StubValidator:
         proposal: Any,
         *,
         mapping: AccountMapping | None = None,
+        valued: Any = None,
     ) -> _StubVerdict:
         self.calls += 1
         return self.verdict

@@ -35,10 +35,16 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from sat_descarga_masiva.contabilidad.roles import AccountRole
 from sat_descarga_masiva.domain.model.value_objects import Rfc, Uuid
 from sat_descarga_masiva.domain.policy.money import NormalizedAmount
+
+if TYPE_CHECKING:
+    #: The rung that valued an entry (§8a:231). Imported for typing only: the journal is the
+    #: chart-free model, and the persisted vocabulary is read back by the adapter.
+    from sat_descarga_masiva.application.ports.accounting import FXSource
 
 
 class PostingState(StrEnum):
@@ -308,6 +314,10 @@ class JournalLineRecord:
             )
 
 
+#: §8a:231 records three facts about a conversion — the date, the rung and the rate — or none.
+_VALUATION_EVIDENCE_FIELDS = 3
+
+
 @dataclass(frozen=True)
 class JournalEntryRecord:
     """One decision as the durable fact: what §8:166 assigns once and never rewrites.
@@ -343,6 +353,13 @@ class JournalEntryRecord:
     recorded_at: datetime
     assumptions: tuple[AccountingAssumption, ...] = ()
     lines: tuple[JournalLineRecord, ...] = ()
+    #: §8a:231's valuation evidence, recorded with the posting it valued. All three are
+    #: ``None`` for an entry that needed no conversion (an ``MXN`` document); a conversion
+    #: records all three, because a reader must be able to re-derive the pesos from the rate,
+    #: the date it applied to and the rung that answered.
+    valuation_date: date | None = None
+    valuation_source: FXSource | None = None
+    valuation_rate: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not self.entry_key.strip():
@@ -384,3 +401,29 @@ class JournalEntryRecord:
                     "§8:159: a POSTED entry resolves every leg — §8a:207's mapping is a"
                     f" precondition, not a hope; unresolved: {unresolved}"
                 )
+        self._check_valuation_evidence()
+
+    def _check_valuation_evidence(self) -> None:
+        """§8a:231: a conversion is recorded whole, or not at all.
+
+        The three facts are one piece of evidence: a rate without the date it applied to, or a
+        date without the rung that answered, cannot re-derive the pesos a reader is trying to
+        explain. ``None``/``None``/``None`` is the closed case — an entry that needed no
+        conversion.
+        """
+        recorded = [
+            item
+            for item in (self.valuation_date, self.valuation_source, self.valuation_rate)
+            if item is not None
+        ]
+        if len(recorded) not in (0, _VALUATION_EVIDENCE_FIELDS):
+            raise ValueError(
+                "§8a:231: a valuation is recorded whole — date, source and rate together — or"
+                " not at all; half the evidence cannot re-derive a converted amount"
+            )
+        if self.valuation_rate is not None and (
+            not self.valuation_rate.is_finite() or self.valuation_rate <= 0
+        ):
+            raise ValueError(
+                f"§8a:231: {self.valuation_rate} is not a rate a posting could have used"
+            )

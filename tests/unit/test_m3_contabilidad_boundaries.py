@@ -279,6 +279,10 @@ def test_the_journal_records_a_store_writes_are_the_engines_own() -> None:
     assert not _forbidden_modules(modules)
     assert not _external_modules(modules)
     assert sorted(module for module in modules if module.startswith("sat_descarga_masiva")) == [
+        # §8a:231's `FXSource` is the persisted valuation vocabulary the record names. §4 rule 3
+        # allows `contabilidad` to depend on *application abstractions*, and the import is
+        # typing-only — the journal still names no adapter and reads no rate itself.
+        "sat_descarga_masiva.application.ports.accounting",
         "sat_descarga_masiva.contabilidad.roles",
         "sat_descarga_masiva.domain.model.value_objects",
         "sat_descarga_masiva.domain.policy.money",
@@ -380,10 +384,12 @@ def test_a25_the_new_stage_depends_inward_only() -> None:
         "sat_descarga_masiva.application.ports.services",
         "sat_descarga_masiva.application.ports.source",
         "sat_descarga_masiva.contabilidad.classification",
+        "sat_descarga_masiva.contabilidad.fx",
         "sat_descarga_masiva.contabilidad.journal",
         "sat_descarga_masiva.contabilidad.rules.contract",
         "sat_descarga_masiva.contabilidad.rules.posting",
         "sat_descarga_masiva.contabilidad.validator",
+        "sat_descarga_masiva.contabilidad.valuation",
         "sat_descarga_masiva.domain.enums.comprobante",
         "sat_descarga_masiva.domain.errors",
         "sat_descarga_masiva.domain.model.fiscal_document",

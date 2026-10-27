@@ -23,7 +23,9 @@ import json
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
+from sat_descarga_masiva.application.ports.accounting import FXSource
 from sat_descarga_masiva.contabilidad.journal import (
     JournalEntryRecord,
     JournalLineRecord,
@@ -614,7 +616,7 @@ SELECT {_RUN_COLUMNS} FROM pipeline_runs WHERE client_rfc = ? ORDER BY started_a
 _JOURNAL_ENTRY_COLUMNS = """
     e.entry_key, e.contributor_rfc, e.source_uuid, e.source_hash, e.rule_id, e.rule_version,
     e.mapping_version, e.posting_state, e.entry_date, e.recorded_at, e.assumptions,
-    s.policy_version
+    s.policy_version, s.valuation_date, s.valuation_source, s.valuation_rate
 """
 
 _SELECT_JOURNAL_ENTRY = f"""
@@ -648,12 +650,14 @@ INSERT INTO journal_lines (
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
 """
 
-#: The valuation columns are deliberately absent: §8:192's columns are for a conversion that
-#: did not happen, so they stay NULL. Writing them explicitly here would state a fact.
+#: §8a:231's valuation evidence is written only when a conversion happened: the three columns
+#: are NULL for an `MXN` posting, and a reader can therefore tell "valued at this rate" from
+#: "needed no valuation" without re-reading the source document.
 _INSERT_POSTING_SNAPSHOT = """
 INSERT INTO posting_snapshot (
-    entry_key, source_hash, rule_version, policy_version, mapping_version, posted_at
-) VALUES (?, ?, ?, ?, ?, ?)
+    entry_key, source_hash, rule_version, policy_version, mapping_version, posted_at,
+    valuation_date, valuation_source, valuation_rate
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -1515,6 +1519,13 @@ def _journal_entry_from_row(
         recorded_at=_from_iso(row["recorded_at"]),
         assumptions=decode_assumptions(row["assumptions"]),
         lines=lines,
+        valuation_date=(
+            None if row["valuation_date"] is None else date.fromisoformat(row["valuation_date"])
+        ),
+        valuation_source=(
+            None if row["valuation_source"] is None else FXSource(row["valuation_source"])
+        ),
+        valuation_rate=(None if row["valuation_rate"] is None else Decimal(row["valuation_rate"])),
     )
 
 
@@ -1617,6 +1628,9 @@ class SqliteJournalEntryStore:
                 record.policy_version,
                 record.mapping_version,
                 _iso(record.recorded_at),
+                None if record.valuation_date is None else record.valuation_date.isoformat(),
+                None if record.valuation_source is None else record.valuation_source.value,
+                None if record.valuation_rate is None else format(record.valuation_rate, "f"),
             ),
         )
 

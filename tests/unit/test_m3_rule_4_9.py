@@ -286,6 +286,9 @@ def test_a_note_in_another_currency_is_not_valued() -> None:
     assert _flag_types(review) == [ReviewFlagType.AMBIGUOUS_FX]
 
 
+# [DEFERRED TEST] Known partial-payment/REP branch: needs the REP↔source reverse-history seam
+# and a review flag that is still [UNRESOLVED] — so no seam, fixture or flag is invented here.
+
 # --- the whole seam (§12's golden path) ---------------------------------------------------
 
 
@@ -320,3 +323,17 @@ def test_the_reversal_reaches_the_validator_and_stays_proposed() -> None:
         AccountRole.GASTO,
         AccountRole.IVA_ACRED_PENDIENTE,
     }
+
+
+def test_unread_payment_history_is_not_a_proven_zero_payment_history() -> None:
+    """§8a:235: "no REP found" is not "proven no REP exists" — the review gate stays as it is."""
+    review = _refused(rule_4_9(_context()))
+    assert _flag_types(review) == [ReviewFlagType.EGRESO_PAYMENT_HISTORY_UNAVAILABLE]
+    entry = review.entry
+    assert entry is not None
+    assert entry.posting_state is PostingState.PROPOSED
+    # Nothing is inferred about payments: no assumption is recorded, no clearing leg appears, and
+    # no amount is scaled by a payment ratio — the legs stay the note's own amounts.
+    assert entry.assumptions == ()
+    assert not [line for line in entry.lines if line.account_role is AccountRole.CLEARING]
+    assert [str(line.amount.amount) for line in entry.lines] == ["116.00", "100.00", "16.00"]

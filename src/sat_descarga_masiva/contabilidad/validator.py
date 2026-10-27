@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from sat_descarga_masiva.application.ports.accounting import AccountMapping, MappingProvider
+from sat_descarga_masiva.contabilidad.fx import Valuation, ValuationRefusal, ValuationRefusalKind
 from sat_descarga_masiva.contabilidad.journal import (
     JournalEntryRecord,
     JournalLineRecord,
@@ -53,14 +54,19 @@ from sat_descarga_masiva.contabilidad.roles import AccountRole
 from sat_descarga_masiva.contabilidad.rules.cancellation import CANCELLATION_SKIP_RULE_IDS
 from sat_descarga_masiva.contabilidad.rules.contract import PostingContext, ReviewRequest, Skip
 from sat_descarga_masiva.contabilidad.rules.scope import OUT_OF_SCOPE_RULES
+from sat_descarga_masiva.contabilidad.valuation import ValuedEntry
 from sat_descarga_masiva.domain.enums.comprobante import TipoComprobante
-from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocumentStatus
+from sat_descarga_masiva.domain.model.fiscal_document import FiscalDocument, FiscalDocumentStatus
 from sat_descarga_masiva.domain.model.review import ReviewFlag, ReviewFlagType
 
 #: The engine's monetary/valuation policy version. §8:159 records it with every posting (it
 #: travels to `posting_snapshot.policy_version`), so a posting stays explainable against the
-#: policy that produced it.
-POLICY_VERSION = "1"
+#: policy that produced it. ``2`` is the version that first values a foreign-currency entry
+#: (§8a:226–231): a decision made under it may carry `valuation_date`/`source`/`rate`, while
+#: ``1`` only refused `AMBIGUOUS_FX`. It is provenance, not identity — it is absent from
+#: `PostingFingerprint` (§8a:195), so this bump re-keys nothing and re-values no history, and
+#: rows recorded under ``1`` are neither migrated nor rewritten.
+POLICY_VERSION = "2"
 
 #: The one currency this engine can value without an FX decision (§8:193). Anything else needs
 #: a resolved rate — source-document → REP → configured → Banxico — and that resolution does
@@ -78,6 +84,41 @@ _SKIP_RULE_IDS = frozenset(rule.rule_id for rule in OUT_OF_SCOPE_RULES) | CANCEL
 #: exactly where the condition is evaluated.
 def _flag(flag_type: ReviewFlagType, reason: str) -> ReviewFlag:
     return ReviewFlag(flag_type=flag_type, reason=reason)
+
+
+def _fx_refusal(
+    document: FiscalDocument, valued: ValuedEntry | ValuationRefusal | None
+) -> ReviewFlag | None:
+    """§8:159's condition 4, answered from the conversion resolved before the gate (§8a:226).
+
+    Three outcomes, three honest answers, and none of them is a rate the engine invented:
+
+    - no valuation was resolved at all — the caller did not run `value_entry`, so the document
+      is refused exactly as it was before T7 voted on it (``AMBIGUOUS_FX``);
+    - the policy refused — its own `AMBIGUOUS_FX` flag travels, *except* for the two conversion
+      failures, which are not FX uncertainty: an imbalance is ``UNBALANCED_ENTRY`` (§8a:230) and
+      a leg that rounds away is ``INVALID_AMOUNT`` (§8:159);
+    - a valuation exists — condition 4 passes; condition 6 then checks the pesos balance.
+    """
+    if valued is None:
+        return _flag(
+            ReviewFlagType.AMBIGUOUS_FX,
+            f"currency {document.moneda!r} has no resolved FX rate: no valuation was resolved"
+            " before the gate, and §8:193's chain is never guessed at here (§8a:229)",
+        )
+    if isinstance(valued, ValuationRefusal):
+        if valued.kind is ValuationRefusalKind.POST_CONVERSION_IMBALANCE:
+            return _flag(ReviewFlagType.UNBALANCED_ENTRY, valued.detail)
+        if valued.kind is ValuationRefusalKind.CONVERSION_NOT_BOOKABLE:
+            return _flag(ReviewFlagType.INVALID_AMOUNT, valued.detail)
+        return valued.flag
+    if valued.valuation is None:
+        return _flag(
+            ReviewFlagType.AMBIGUOUS_FX,
+            f"currency {document.moneda!r} was handed to the gate without a valuation record:"
+            " a conversion that records no rate, source or date cannot be posted (§8a:231)",
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -108,6 +149,9 @@ class PostingDecision:
     policy_version: str
     review_flags: tuple[ReviewFlag, ...] = ()
     accounts: Mapping[AccountRole, str] = field(default_factory=dict)
+    #: §8a:231's evidence when this decision converted a foreign-currency proposal. ``None``
+    #: for an entry that needed no conversion: no record is invented for an ``MXN`` posting.
+    valuation: Valuation | None = None
 
     def __post_init__(self) -> None:
         if not self.mapping_version.strip():
@@ -187,6 +231,9 @@ class PostingDecision:
             entry_date=self.entry.entry_date,
             recorded_at=recorded_at,
             assumptions=self.entry.assumptions,
+            valuation_date=None if self.valuation is None else self.valuation.valuation_date,
+            valuation_source=None if self.valuation is None else self.valuation.source,
+            valuation_rate=None if self.valuation is None else self.valuation.rate,
             lines=tuple(
                 JournalLineRecord(
                     account_role=line.account_role,
@@ -229,6 +276,7 @@ class PostingEligibilityValidator:
         proposal: ProposedJournalEntry | Skip | ReviewRequest,
         *,
         mapping: AccountMapping | None = None,
+        valued: ValuedEntry | ValuationRefusal | None = None,
     ) -> PostingDecision:
         """The verdict for this document's rule answer: `POSTED`, `SKIPPED` or `PROPOSED`.
 
@@ -244,6 +292,13 @@ class PostingEligibilityValidator:
         pays for the YAML once (§8a:207). It is optional and keyword-only, and passing nothing
         simply means this class does the resolving — either way the object the outcome names is
         the one the port answered with, never a second read that could disagree.
+
+        ``valued`` is the resolved conversion, when the document needed one (§8a:226): the
+        proposal in pesos plus its §8a:231 evidence, or the policy's refusal. It is resolved
+        *before* this gate — `contabilidad.valuation.value_entry` — so the decision never
+        consults a provider, and a caller that passes nothing gets exactly the pre-T7 answer:
+        a foreign-currency document is `AMBIGUOUS_FX`. An ``MXN`` document needs no valuation
+        and ignores this argument.
         """
         resolved = (
             mapping if mapping is not None else self._mapping.mapping_for(request.contributor_rfc)
@@ -252,7 +307,7 @@ class PostingEligibilityValidator:
             return self._skip(proposal, resolved)
         if isinstance(proposal, ReviewRequest):
             return self._review(proposal, resolved)
-        return self._post(request, proposal, resolved)
+        return self._post(request, proposal, resolved, valued)
 
     def _skip(self, skip: Skip, mapping: AccountMapping) -> PostingDecision:
         """§8:161: a skip is honoured — for an out-of-scope rule id, and only for one."""
@@ -302,20 +357,29 @@ class PostingEligibilityValidator:
         request: PostingContext,
         entry: ProposedJournalEntry,
         mapping: AccountMapping,
+        valued: ValuedEntry | ValuationRefusal | None,
     ) -> PostingDecision:
-        refusals = self._refusals(request, entry, mapping)
+        # The entry that would actually be booked: a conversion replaced each leg's amount, and
+        # §8:158's balance gate has to be applied to *those* pesos, not to the document's own
+        # currency (§8a:230). An ``MXN`` proposal is its own postable entry.
+        posted = valued.entry if isinstance(valued, ValuedEntry) else entry
+        refusals = self._refusals(request, posted, mapping, valued)
         if refusals:
+            # The refusal records the proposal *as the rule wrote it*, in the document's own
+            # currency and without valuation evidence: nothing was posted, so nothing was
+            # converted, and half an explanation (pesos with no rate) would be worse than none.
             return self._refuse(entry, mapping, refusals)
-        roles = {line.account_role for line in entry.lines}
+        roles = {line.account_role for line in posted.lines}
         accounts = {
             role: account for role in roles if (account := mapping.resolve(role)) is not None
         }
         return PostingDecision(
-            entry=entry,
+            entry=posted,
             posting_state=PostingState.POSTED,
             mapping_version=mapping.mapping_version,
             policy_version=self._policy_version,
             accounts=accounts,
+            valuation=valued.valuation if isinstance(valued, ValuedEntry) else None,
         )
 
     def _refuse(
@@ -338,6 +402,7 @@ class PostingEligibilityValidator:
         request: PostingContext,
         entry: ProposedJournalEntry,
         mapping: AccountMapping,
+        valued: ValuedEntry | ValuationRefusal | None,
     ) -> tuple[ReviewFlag, ...]:
         """§8:159's ten conditions, in its own order, each contributing at most one reason.
 
@@ -395,25 +460,20 @@ class PostingEligibilityValidator:
                 )
             )
         # 4. deterministic FX valuation (§8:193). Only the national currency is valuated without
-        #    an FX decision; a foreign-currency document awaits the resolution §8:193 defines
-        #    (and the ⚠ contador ruling behind it), so it is never valued at a rate the engine
-        #    picked on its own. A REP is exempt from this *header* test and only from it: a `P`
-        #    comprobante's header carries no currency of its own (§8:192 gives every payment its
-        #    own `MonedaP`/`MonedaDR`), so §8:193's resolution for a REP belongs to the payment's
-        #    own facts — where rule 4.5a/4.5b refuses to value them and flags
-        #    `FX_DIFFERENCE_UNCONFIRMED` instead. Testing the header here would refuse every REP
-        #    for a reason that is not about the currency the entry is valued in.
+        # 4. deterministic FX valuation (§8:159/§8:193). The conversion is resolved *before*
+        #    this gate (§8a:226) and handed in as ``valued``; the gate's job is to insist that a
+        #    foreign-currency entry actually has one. Absent a valuation, the answer is the
+        #    pre-T7 one — `AMBIGUOUS_FX`, not a rate the engine picked on its own. A `P`
+        #    comprobante is exempt from this *header* test and only from it: its header carries
+        #    no currency of its own (§8:192), so its valuation belongs to the payment's own
+        #    facts (§8a:232's parked rung), not to this condition.
         if (
             document.moneda.upper() != _NATIONAL_CURRENCY
             and TipoComprobante.of(document.tipo) is not TipoComprobante.PAGO
         ):
-            flags.append(
-                _flag(
-                    ReviewFlagType.AMBIGUOUS_FX,
-                    f"currency {document.moneda!r} has no resolved FX rate: §8:193's priority"
-                    " chain is not implemented yet",
-                )
-            )
+            flag = _fx_refusal(document, valued)
+            if flag is not None:
+                flags.append(flag)
         # 5. valid Decimal amounts (§4/§12). Construction already refuses a non-positive or
         #    non-finite leg, so this is the second pair of eyes §8:159 asks for.
         if any(not line.amount.amount.is_finite() for line in entry.lines):

@@ -135,6 +135,13 @@ class ValuationRefusalKind(StrEnum):
     INVALID_SOURCE_RATE = "invalid_source_rate"
     #: The document states none, and no rung answered.
     PRIORITY_EXHAUSTED = "priority_exhausted"
+    #: A rate was resolved, but the converted entry no longer balances (§8a:230). Not an FX
+    #: uncertainty: the rate is fine, the per-leg rounding is what cannot be booked, and the
+    #: gate answers it as `UNBALANCED_ENTRY` rather than as `AMBIGUOUS_FX`.
+    POST_CONVERSION_IMBALANCE = "post_conversion_imbalance"
+    #: A rate was resolved, but a leg does not survive conversion (it rounds to zero). The gate
+    #: answers it as `INVALID_AMOUNT`: a leg that states no movement is not an amount.
+    CONVERSION_NOT_BOOKABLE = "conversion_not_bookable"
 
 
 @dataclass(frozen=True)

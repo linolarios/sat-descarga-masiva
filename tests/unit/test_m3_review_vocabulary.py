@@ -8,6 +8,7 @@ they are persisted TEXT, so a rename would silently orphan stored facts.
 
 from datetime import datetime
 
+from sat_descarga_masiva.contabilidad.journal import PostingState
 from sat_descarga_masiva.domain.model.review import (
     ReviewFlag,
     ReviewFlagRecord,
@@ -50,6 +51,7 @@ M3_FLAGS = {
     "EGRESO_ORIGINAL_NOT_POSTED": "egreso_original_not_posted",
     "EGRESO_EXCEEDS_ORIGINAL": "egreso_exceeds_original",
     "EGRESO_PAYMENT_HISTORY_UNAVAILABLE": "egreso_payment_history_unavailable",
+    "RETENCION_IVA_ADJUSTMENT_REQUIRES_REVIEW": "retencion_iva_adjustment_requires_review",
 }
 
 
@@ -118,3 +120,20 @@ def test_the_credit_note_blocker_is_not_a_known_payment_condition() -> None:
         ReviewFlagType.PARTIAL_PAYMENT_REVERSAL_UNSPECIFIED
     )
     assert ReviewFlagType.EGRESO_PAYMENT_HISTORY_UNAVAILABLE != ReviewFlagType.MISSING_REP_ORIGINAL
+
+
+def test_the_retained_iva_review_flag_is_approved_and_the_narrow_one_rejected() -> None:
+    """§8a:233: the review flag is approved; "the retention was remitted" is not a fact here."""
+    assert ReviewFlagType.RETENCION_IVA_ADJUSTMENT_REQUIRES_REVIEW == (
+        "retencion_iva_adjustment_requires_review"
+    )
+    # A deliberate rejection, not an oversight: no evidence port can prove a retention was
+    # remitted, so no flag may claim it — and §8a:233 states the reason must say *unknown*.
+    assert "retencion_iva_ya_enterada" not in {flag.value for flag in ReviewFlagType}
+    assert not hasattr(ReviewFlagType, "RETENCION_IVA_YA_ENTERADA")
+
+
+def test_the_posting_state_vocabulary_is_three_words() -> None:
+    """§8:161: `NEEDS_REVIEW` is `PROPOSED` + blocking flags — never a posting state of its own."""
+    assert {state.value for state in PostingState} == {"proposed", "posted", "skipped"}
+    assert not hasattr(PostingState, "NEEDS_REVIEW")
