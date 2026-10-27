@@ -25,12 +25,22 @@ role its products classify to. `AccountMapping.category_for` reads that table an
 `ClassificationRefusal` — via `contabilidad.classification.classify_document`. Like the
 account table, the classification table is versioned by `mapping_version`; there is no
 second version scheme.
+
+The module's second half is the other question the engine cannot answer for itself
+(§8:193): what a non-MXN comprobante is worth in pesos, and on which date. `FXRate` is that
+answer and `FXRateProvider` the thing asked for it — one rate for one currency on one date,
+or ``None``. Which rung of §8a:226's chain may be asked, in which order, and what a refusal
+looks like is the *policy's* decision (`contabilidad.fx.FXRateResolutionPolicy`), not this
+port's: an adapter states rates, it never decides whether they are consulted.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal
+from enum import StrEnum
 from typing import Protocol
 
 from sat_descarga_masiva.contabilidad.classification import (
@@ -112,3 +122,60 @@ class MappingProvider(Protocol):
     """
 
     def mapping_for(self, client_rfc: Rfc) -> AccountMapping: ...
+
+
+class FXSource(StrEnum):
+    """Which rung of §8:193's chain produced a rate — persisted as ``valuation_source``.
+
+    The values are written into ``posting_snapshot``, so they are schema, not messages. A
+    rung ruled later (a REP's ``EquivalenciaDR``, a Banxico lookup) is a new member, never a
+    rename — an entry booked years ago must still say which rung valued it (§8a:231).
+    """
+
+    SOURCE_DOCUMENT = "source_document"
+    CONFIGURED = "configured"
+
+
+@dataclass(frozen=True)
+class FXRate:
+    """A rate that answers a *dated* question: ``1 currency == rate MXN`` on ``on`` (§8:193).
+
+    ``rate`` is validated here rather than trusted: every rung constructs one of these, and
+    a zero, negative or non-finite rate is not a rate at all, so a rung that cannot state a
+    usable one must answer ``None`` instead of this type. ``is_finite()`` is checked before
+    ``> 0`` because comparing ``Decimal("NaN")`` raises ``InvalidOperation`` — the guard has
+    to survive the value it rejects.
+
+    The rate is carried exactly as given. Quantizing it is the conversion's business (§8:193
+    rounds per leg, in pesos), not the port's, so the number the ledger writes down is the
+    number that was used.
+
+    There is no ``source`` field: which rung answered is the *policy's* knowledge, and an
+    adapter should not be able to nominate itself as the document's own rate.
+    """
+
+    currency: str
+    on: date
+    rate: Decimal
+
+    def __post_init__(self) -> None:
+        if not self.currency.strip():
+            raise ValueError("an FX rate needs the currency it prices")
+        if not self.rate.is_finite() or self.rate <= 0:
+            raise ValueError(
+                f"{self.currency}: {self.rate} is not a usable rate (§8:193) — a rung that"
+                " cannot state a positive finite rate answers None instead"
+            )
+
+
+class FXRateProvider(Protocol):
+    """One rung of §8:193's chain, asked for one currency's rate on one date.
+
+    ``None`` is the whole vocabulary for "this rung cannot answer": unreachable, nothing
+    configured, no entry for that currency. It is not a way to *disagree* — §8a:227 has no
+    corroboration step, so whichever rung answers is the rate, and a provider that returns a
+    rate for another currency or another date has broken this contract rather than opened a
+    review case.
+    """
+
+    def get_rate(self, currency: str, on: date) -> FXRate | None: ...
